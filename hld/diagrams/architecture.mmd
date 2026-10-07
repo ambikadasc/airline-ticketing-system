@@ -1,0 +1,46 @@
+flowchart TB
+    Client["API clients<br/>(customers, back office)"]
+
+    subgraph App["airline-reservation (Spring Boot, stateless, N instances)"]
+        direction TB
+        Filter["RequestIdFilter<br/>request id in MDC"]
+        subgraph Web["REST controllers + request validation"]
+            AdminCtl["AdminScheduleController<br/>/api/v1/admin/schedules"]
+            FlightCtl["FlightController<br/>/api/v1/flights"]
+            BookingCtl["BookingController<br/>/api/v1/bookings"]
+        end
+        Handler["GlobalExceptionHandler<br/>ProblemDetail + code"]
+        subgraph Services["Application services (transaction boundary)"]
+            ScheduleSvc["ScheduleService"]
+            Generator["FlightInstanceGenerator<br/>(pure logic)"]
+            SearchSvc["FlightSearchService<br/>SeatMapService"]
+            BookingSvc["BookingService"]
+            Policy["BookingPolicy<br/>Immediate | SeatHold<br/>(airline.seat-hold.enabled)"]
+            CancelPolicy["CancellationPolicy<br/>BeforeDeparture"]
+        end
+        Job["InstanceWindowJob<br/>daily cron + on startup"]
+        subgraph Domain["Domain model"]
+            Entities["FlightSchedule, FlightInstance,<br/>Booking, BookingSeat, SeatLayout"]
+        end
+        subgraph Persistence["Repositories"]
+            Repos["Spring Data JPA repositories"]
+            Bulk["FlightInstanceBulkWriter<br/>(JdbcTemplate batch insert)"]
+        end
+    end
+
+    PG[("PostgreSQL 16<br/>Flyway-managed schema")]
+
+    Client -->|HTTPS / JSON| Filter --> Web
+    Web -.->|errors| Handler
+    AdminCtl --> ScheduleSvc
+    FlightCtl --> SearchSvc
+    BookingCtl --> BookingSvc
+    ScheduleSvc --> Generator
+    Job --> ScheduleSvc
+    BookingSvc --> Policy
+    BookingSvc --> CancelPolicy
+    Services --> Domain
+    Services --> Repos
+    ScheduleSvc --> Bulk
+    Repos --> PG
+    Bulk --> PG

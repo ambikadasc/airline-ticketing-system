@@ -1,0 +1,72 @@
+erDiagram
+    AIRPORT ||--o{ FLIGHT_SCHEDULE : "origin / destination"
+    AIRCRAFT ||--o{ FLIGHT_SCHEDULE : "operates"
+    FLIGHT_SCHEDULE ||--|{ FLIGHT_SCHEDULE_DAY : "runs on"
+    FLIGHT_SCHEDULE ||--o{ FLIGHT_INSTANCE : "generates"
+    AIRPORT ||--o{ FLIGHT_INSTANCE : "origin / destination"
+    AIRCRAFT ||--o{ FLIGHT_INSTANCE : "operates"
+    FLIGHT_INSTANCE ||--o{ BOOKING : "has"
+    BOOKING ||--|{ BOOKING_SEAT : "contains"
+    FLIGHT_INSTANCE ||--o{ BOOKING_SEAT : "seat taken on"
+
+    AIRPORT {
+        varchar(3) code PK "IATA, ^[A-Z]{3}$"
+        varchar(150) name
+        varchar(100) city
+        varchar(100) country
+    }
+    AIRCRAFT {
+        bigint id PK
+        varchar(20) code UK "registration"
+        varchar(50) aircraft_type "e.g. A320"
+        integer row_count "1..99"
+        varchar(12) seat_letters "e.g. ABCDEF"
+    }
+    FLIGHT_SCHEDULE {
+        bigint id PK
+        varchar(8) flight_number UK
+        varchar(3) origin_code FK
+        varchar(3) destination_code FK "<> origin"
+        time departure_time "UTC"
+        time arrival_time "UTC"
+        integer arrival_day_offset "0..1, derived"
+        bigint aircraft_id FK
+        timestamptz created_at
+    }
+    FLIGHT_SCHEDULE_DAY {
+        bigint schedule_id PK, FK
+        varchar(9) day_of_week PK "MONDAY..SUNDAY"
+    }
+    FLIGHT_INSTANCE {
+        bigint id PK
+        bigint schedule_id FK "UK with flight_date"
+        varchar(8) flight_number "copied"
+        varchar(3) origin_code FK "copied"
+        varchar(3) destination_code FK "copied"
+        bigint aircraft_id FK "copied"
+        date flight_date "UTC departure date"
+        timestamptz departure_at
+        timestamptz arrival_at "> departure_at"
+        integer total_seats
+        integer available_seats "0..total_seats"
+    }
+    BOOKING {
+        bigint id PK
+        varchar(12) reference UK "PNR"
+        bigint flight_instance_id FK
+        varchar(16) status "HELD, CONFIRMED, CANCELLED, EXPIRED"
+        integer passenger_count "> 0"
+        timestamptz created_at
+        timestamptz hold_expires_at "only while HELD"
+        timestamptz cancelled_at
+    }
+    BOOKING_SEAT {
+        bigint id PK
+        bigint booking_id FK
+        bigint flight_instance_id FK "partial UK with seat_number"
+        varchar(4) seat_number "e.g. 12A"
+        varchar(120) passenger_name
+        varchar(16) status "ACTIVE, HELD, RELEASED"
+        timestamptz created_at
+        timestamptz released_at
+    }

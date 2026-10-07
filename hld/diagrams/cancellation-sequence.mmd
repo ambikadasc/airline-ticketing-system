@@ -1,0 +1,36 @@
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant API as BookingController
+    participant S as BookingService
+    participant P as CancellationPolicy
+    participant DB as PostgreSQL
+
+    C->>API: POST /api/v1/bookings/{reference}/cancel
+    API->>S: cancelBooking(reference)
+    S->>DB: BEGIN
+    S->>DB: SELECT flight_instance_id FROM booking WHERE reference = ?
+    alt not found
+        S-->>API: BookingNotFoundException
+        API-->>C: 404 BOOKING_NOT_FOUND
+    end
+    S->>DB: SELECT flight_instance ... FOR UPDATE
+    Note over S,DB: Same lock as booking, taken first.<br/>A second cancel waits here.
+    S->>DB: expireHolds(instance, now)<br/>(finds nothing when seat hold is off)
+    S->>DB: SELECT booking JOIN FETCH seats (first load, under the lock)
+    alt already CANCELLED or EXPIRED
+        S->>DB: COMMIT (nothing changed)
+        API-->>C: 200 current state (idempotent)
+    else CONFIRMED or HELD
+        S->>P: verifyCancellable(booking, flight, now)
+        alt policy refuses (today: flight departed)
+            P-->>S: BookingNotCancellableException
+            S->>DB: ROLLBACK
+            API-->>C: 409 BOOKING_NOT_CANCELLABLE
+        end
+        S->>S: booking.cancel(now): seats -> RELEASED,<br/>booking -> CANCELLED, returns n
+        S->>DB: UPDATE booking, booking_seat
+        S->>DB: UPDATE flight_instance SET available_seats = available_seats + n
+        S->>DB: COMMIT
+        API-->>C: 200 status CANCELLED
+    end

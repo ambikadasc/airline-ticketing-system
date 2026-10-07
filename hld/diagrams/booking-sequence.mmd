@@ -1,0 +1,31 @@
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant API as BookingController
+    participant S as BookingService
+    participant P as BookingPolicy
+    participant DB as PostgreSQL
+
+    C->>API: POST /api/v1/bookings
+    API->>API: Bean Validation (shape, 1..9 passengers)
+    API->>S: createBooking(command)
+    S->>S: BookingRequestValidator<br/>(normalise seats, format, duplicates)
+    S->>DB: BEGIN
+    S->>DB: SELECT flight_instance ... FOR UPDATE
+    Note over S,DB: Writes on this flight are now serialised.<br/>Other flights are unaffected.
+    S->>DB: expireHolds(instance, now): overdue HELD -> EXPIRED,<br/>seats RELEASED, available_seats restored<br/>(finds nothing when seat hold is off)
+    S->>S: flight not departed? seats exist in SeatLayout?
+    S->>DB: SELECT seat_number FROM booking_seat<br/>WHERE status IN (ACTIVE, HELD) AND seat_number IN (...)
+    alt any requested seat taken
+        S->>DB: ROLLBACK
+        S-->>API: SeatUnavailableException(seats)
+        API-->>C: 409 SEAT_UNAVAILABLE + unavailableSeats
+    else all seats free
+        S->>P: newBooking(...)
+        P-->>S: CONFIRMED + ACTIVE seats<br/>(or HELD + HELD seats, expires now + ttl)
+        S->>DB: INSERT booking, booking_seat rows (flush)
+        S->>DB: UPDATE flight_instance SET available_seats = available_seats - n
+        S->>DB: COMMIT
+        S-->>API: BookingResult
+        API-->>C: 201 Created + Location
+    end

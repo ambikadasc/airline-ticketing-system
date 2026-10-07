@@ -1,0 +1,24 @@
+stateDiagram-v2
+    direction LR
+
+    state "Booking status" as BookingStatus {
+        [*] --> CONFIRMED: create (seat hold off)
+        [*] --> HELD: create (seat hold on)
+        HELD --> CONFIRMED: confirm() before hold_expires_at
+        HELD --> EXPIRED: expireHold() at/after hold_expires_at
+        HELD --> CANCELLED: cancel()
+        CONFIRMED --> CANCELLED: cancel()
+        CONFIRMED --> [*]
+        CANCELLED --> [*]
+        EXPIRED --> [*]
+    }
+
+    state "Seat status (booking_seat)" as SeatStatus {
+        state "HELD" as SEAT_HELD
+        [*] --> ACTIVE: booking CONFIRMED
+        [*] --> SEAT_HELD: booking HELD
+        SEAT_HELD --> ACTIVE: booking confirmed
+        SEAT_HELD --> RELEASED: booking expired / cancelled
+        ACTIVE --> RELEASED: booking cancelled
+        RELEASED --> [*]
+    }
