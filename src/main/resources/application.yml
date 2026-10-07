@@ -1,0 +1,31 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: airline-reservation
+  datasource:
+    # Docker Compose overrides this with SPRING_DATASOURCE_URL.
+    url: jdbc:postgresql://localhost:5432/airline
+    username: airline
+    password: airline
+    hikari:
+      # A request that cannot get a flight lock within 3s fails fast (mapped to 503 LOCK_TIMEOUT).
+      connection-init-sql: SET lock_timeout = '3s'
+  jpa:
+    open-in-view: false
+    hibernate:
+      # Flyway owns the schema; Hibernate only checks the entities match it.
+      ddl-auto: validate
+    properties:
+      hibernate.jdbc.time_zone: UTC
+  flyway:
+    locations: classpath:db/migration
+
+airline:
+  booking-window-days: 365
+  max-seats-per-booking: 9
+  instance-job-cron: "0 5 0 * * *"
+  seat-hold:
+    enabled: false
+    ttl: PT10M
