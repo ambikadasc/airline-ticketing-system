@@ -28,3 +28,10 @@ One line per decision, newest phase last. The reasoning for the major ones is in
 - No Spring Boot Docker Compose support dependency: Compose is started explicitly (`docker compose up`), not by the application.
 - Integration tests share `TestcontainersConfiguration`: a `postgres:16` container and a fixed clock at 2026-01-05T00:00:00Z (a Monday).
 - The Docker image build skips tests because they need Docker; tests run with `./mvnw verify`.
+
+## Phase 1 – Schema and reference data
+- Migrations V1–V3 are `db/schema.sql` split by area (same DDL and comments); V4 holds seed data only. A `pg_dump --schema-only` of each showed identical schemas.
+- Seed aircraft use fictional registrations `A6-XYA` (A320, 180 seats), `A6-XYB` (B777, 400), `A6-XYC` (ATR72, 72), with explicit ids 1–3 and the identity sequence moved past them.
+- Read-only repositories extend Spring Data's bare `Repository` and declare only the finders in use, so seeded data has no save or delete methods.
+- `SeatLayout` validates its own invariants (rows 1–99, distinct letters A–Z); duplicate letters are checked only in Java.
+- `SeatLayout.contains` is case-sensitive and does not trim; normalising seat input is the booking validator's job, so it happens in one place.
