@@ -1,0 +1,34 @@
+# Private working material for Claude Code (not part of the submission)
+prep/
+# Decide before submission whether to commit CLAUDE.md (AI use is allowed).
+# Remove the next line to commit it.
+CLAUDE.md
+.claude/settings.local.json
+
+# Build output
+target/
+build/
+.gradle/
+out/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.project
+.classpath
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local configuration and secrets
+.env
+*.local.yml
+*.local.properties
+
+# Logs
+*.log
+logs/
+/PLAN.md
