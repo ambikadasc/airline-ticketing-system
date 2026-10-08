@@ -13,7 +13,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class AirlineReservationApplicationTests extends IntegrationTest {
 
 	@Autowired
-	private Clock clock;
+	private Clock injectedClock;
 
 	@Autowired
 	private AirlineProperties properties;
@@ -24,7 +24,7 @@ class AirlineReservationApplicationTests extends IntegrationTest {
 
 	@Test
 	void injectedClockIsTheFixedTestClock() {
-		assertThat(clock.instant()).isEqualTo(TestcontainersConfiguration.TEST_NOW);
+		assertThat(injectedClock.instant()).isEqualTo(TestcontainersConfiguration.TEST_NOW);
 	}
 
 	@Test

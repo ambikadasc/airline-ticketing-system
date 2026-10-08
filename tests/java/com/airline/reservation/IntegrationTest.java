@@ -27,8 +27,12 @@ public abstract class IntegrationTest {
 	@Autowired
 	protected JdbcTemplate jdbcTemplate;
 
+	@Autowired
+	protected MutableClock clock;
+
 	@BeforeEach
 	void cleanTransactionalTables() {
+		clock.reset();
 		jdbcTemplate.execute("TRUNCATE booking_seat, booking, flight_instance, flight_schedule_day, flight_schedule "
 				+ "RESTART IDENTITY CASCADE");
 	}

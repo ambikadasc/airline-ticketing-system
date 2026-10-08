@@ -54,6 +54,14 @@ public class BookingSeat {
 		this.createdAt = now;
 	}
 
+	/** A held seat becomes a confirmed one. */
+	void activate() {
+		if (status != SeatStatus.HELD) {
+			throw new IllegalStateException("Only a HELD seat can be activated, not " + status);
+		}
+		status = SeatStatus.ACTIVE;
+	}
+
 	/** Frees the seat for other bookings. Returns false if it was already released. */
 	boolean release(Instant now) {
 		if (status == SeatStatus.RELEASED) {

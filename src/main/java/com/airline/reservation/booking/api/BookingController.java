@@ -35,6 +35,12 @@ public class BookingController {
 		return ResponseEntity.created(URI.create("/api/v1/bookings/" + booking.bookingReference())).body(booking);
 	}
 
+	@Operation(summary = "Confirm a held booking before its hold expires (only needed with the seat hold enabled)")
+	@PostMapping("/{reference}/confirm")
+	public BookingResult confirm(@PathVariable String reference) {
+		return bookingService.confirmBooking(reference);
+	}
+
 	@Operation(summary = "Cancel a booking and release its seats (repeating it returns the same result)")
 	@PostMapping("/{reference}/cancel")
 	public BookingResult cancel(@PathVariable String reference) {

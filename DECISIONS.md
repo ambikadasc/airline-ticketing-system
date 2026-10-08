@@ -72,3 +72,13 @@ One line per decision, newest phase last. The reasoning for the major ones is in
 - `FlightInstance.release(n)` is guarded by `total_seats`, mirroring `reserve`.
 - The cancel response is the full booking with status CANCELLED; its seats stay listed as a record of what was booked.
 - Concurrency test helpers (start-gate runner, outcome counting, inventory invariant) live in one shared `ConcurrencySupport` used by both concurrency classes. Both classes passed 5 runs in a row.
+
+## Phase 4b – Seat hold
+- `BookingPolicy` (Strategy) with `ImmediateConfirmationPolicy` and `SeatHoldPolicy`, chosen once in `BookingPolicyConfig`: the only place `airline.seat-hold.enabled` is read. The policies are plain classes, so exactly one bean exists.
+- Lazy expiry: every write on a flight (book, confirm, cancel) locks the flight, then releases its overdue holds, then works on bookings. No scheduler.
+- `expireHolds` flushes before the seat check, because that check is plain SQL and Hibernate's automatic flush does not cover it.
+- If a write fails after releasing holds (e.g. 409), the release is rolled back with it; harmless, since reads already treat those holds as free and the next successful write releases them.
+- Confirm: CONFIRMED → 200 unchanged (also with the flag off); CANCELLED → 409 `BOOKING_NOT_CONFIRMABLE`; EXPIRED (or overdue) → 409 `HOLD_EXPIRED`; departed flight → 409 `FLIGHT_NOT_BOOKABLE`. Cancel of an EXPIRED booking → 200 unchanged.
+- `hold_expires_at` is kept after a hold ends as a record; the API shows `holdExpiresAt` only while HELD. The expiry is rounded down to whole seconds (it is shown to customers; PostgreSQL keeps microseconds). V3's comment "set only while HELD" is left as written (applied migration); the design docs were reworded.
+- Tests: `MutableClock` replaces the fixed test clock (reset before every test); flag-on tests run in their own Spring context. The confirm-vs-expiry race test uses the clock as its oracle: just before expiry the confirmation always wins, just after the other customer always wins, in whichever order the threads reach the lock (20 rounds). `SeatHoldTest` and both concurrency classes passed 5 runs in a row.
+- Smoke-tested in Docker with the flag on (`AIRLINE_SEAT_HOLD_ENABLED=true` via `docker compose run`): HELD → confirm → CONFIRMED; and with the default (flag off): CONFIRMED, no `holdExpiresAt`.

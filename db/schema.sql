@@ -104,7 +104,7 @@ CREATE TABLE booking (
     status              VARCHAR(16) NOT NULL,
     passenger_count     INTEGER     NOT NULL,
     created_at          TIMESTAMPTZ NOT NULL,
-    hold_expires_at     TIMESTAMPTZ,                      -- set only while HELD
+    hold_expires_at     TIMESTAMPTZ,                      -- set for bookings created HELD; kept as a record
     cancelled_at        TIMESTAMPTZ,
     -- Serves lookup, confirm and cancel by reference.
     CONSTRAINT uq_booking_reference  UNIQUE (reference),

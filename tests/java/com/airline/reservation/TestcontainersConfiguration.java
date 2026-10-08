@@ -1,8 +1,6 @@
 package com.airline.reservation;
 
-import java.time.Clock;
 import java.time.Instant;
-import java.time.ZoneOffset;
 
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
@@ -12,7 +10,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Shared setup for integration tests: the same PostgreSQL engine as production, plus a fixed clock.
+ * Shared setup for integration tests: the same PostgreSQL engine as production, plus a test clock.
  * Import it with {@code @Import(TestcontainersConfiguration.class)}.
  */
 @TestConfiguration(proxyBeanMethods = false)
@@ -27,10 +25,11 @@ public class TestcontainersConfiguration {
 		return new PostgreSQLContainer(DockerImageName.parse("postgres:16"));
 	}
 
+	/** Stands still at TEST_NOW unless a test moves it; reset before every test by IntegrationTest. */
 	@Bean
 	@Primary
-	Clock fixedClock() {
-		return Clock.fixed(TEST_NOW, ZoneOffset.UTC);
+	MutableClock testClock() {
+		return new MutableClock();
 	}
 
 }

@@ -57,7 +57,7 @@ erDiagram
         varchar(16) status "HELD, CONFIRMED, CANCELLED, EXPIRED"
         integer passenger_count "> 0"
         timestamptz created_at
-        timestamptz hold_expires_at "only while HELD"
+        timestamptz hold_expires_at "set for holds, kept after"
         timestamptz cancelled_at
     }
     BOOKING_SEAT {

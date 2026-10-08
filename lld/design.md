@@ -388,7 +388,11 @@ with it off there are no `HELD` rows, so each one reduces to the plain behaviour
 
 - **Expiry (writes, under the lock):** `findOverdueHolds(instanceId, now)` = `HELD` bookings on
   the instance with `hold_expires_at <= now`; each `expireHold(now)`; the instance's counter is
-  incremented by the seats released.
+  incremented by the seats released; then an explicit `flush()`, because the seat check that follows
+  is plain SQL (`SeatOccupancyQueries.takenSeats`), which Hibernate's automatic flush does not cover.
+- **Hold expiry value:** `now + ttl` rounded down to whole seconds (customer-facing; the database
+  stores microseconds). `hold_expires_at` is set for bookings created `HELD` and kept after the hold
+  ends as a record; the API shows `holdExpiresAt` only while the status is `HELD`.
 - **Seat map:** a seat is `BOOKED` if its `booking_seat` row is `ACTIVE`, or `HELD` and its
   booking's `hold_expires_at > now`; otherwise `AVAILABLE`.
 - **Search:** `availableSeats = available_seats + (seats on HELD bookings of that instance with

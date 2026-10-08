@@ -12,6 +12,8 @@ import java.util.concurrent.TimeUnit;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import com.airline.reservation.booking.service.SeatUnavailableException;
+import com.airline.reservation.common.error.ApiException;
+import com.airline.reservation.common.error.ErrorCode;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -23,7 +25,7 @@ class ConcurrencySupport implements AutoCloseable {
 
 	/** How a task ended. Any other exception fails the test: it is neither a success nor the expected conflict. */
 	enum Outcome {
-		SUCCESS, SEAT_UNAVAILABLE
+		SUCCESS, SEAT_UNAVAILABLE, HOLD_EXPIRED
 	}
 
 	@FunctionalInterface
@@ -53,6 +55,12 @@ class ConcurrencySupport implements AutoCloseable {
 				catch (SeatUnavailableException ex) {
 					return Outcome.SEAT_UNAVAILABLE;
 				}
+				catch (ApiException ex) {
+					if (ex.getCode() == ErrorCode.HOLD_EXPIRED) {
+						return Outcome.HOLD_EXPIRED;
+					}
+					throw ex;
+				}
 			}));
 		}
 		startLine.countDown();
@@ -67,15 +75,21 @@ class ConcurrencySupport implements AutoCloseable {
 		return outcomes.stream().filter(o -> o == outcome).count();
 	}
 
-	/** The counter matches the rows, and no seat is active twice. */
+	/**
+	 * The counter matches the rows (ACTIVE and HELD seats are both counted out of available_seats until
+	 * released), and no seat is taken twice.
+	 */
 	void assertSeatInventoryConsistent(long flightId) {
 		Integer totalSeats = jdbcTemplate.queryForObject("SELECT total_seats FROM flight_instance WHERE id = ?",
 				Integer.class, flightId);
-		assertThat(availableSeats(flightId)).isEqualTo(totalSeats - activeSeatCount(flightId));
+		Integer takenRows = jdbcTemplate.queryForObject(
+				"SELECT COUNT(*) FROM booking_seat WHERE flight_instance_id = ? AND status IN ('ACTIVE', 'HELD')",
+				Integer.class, flightId);
+		assertThat(availableSeats(flightId)).isEqualTo(totalSeats - takenRows);
 		Integer duplicated = jdbcTemplate.queryForObject("""
 				SELECT COUNT(*) FROM (
 				  SELECT seat_number FROM booking_seat
-				  WHERE flight_instance_id = ? AND status = 'ACTIVE'
+				  WHERE flight_instance_id = ? AND status IN ('ACTIVE', 'HELD')
 				  GROUP BY seat_number HAVING COUNT(*) > 1) d
 				""", Integer.class, flightId);
 		assertThat(duplicated).as("seats booked more than once").isZero();
