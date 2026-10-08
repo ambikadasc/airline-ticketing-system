@@ -14,7 +14,9 @@ import com.airline.reservation.aircraft.AircraftRepository;
 import com.airline.reservation.aircraft.SeatLayout;
 import com.airline.reservation.booking.domain.Booking;
 import com.airline.reservation.booking.domain.PassengerSeat;
+import com.airline.reservation.booking.domain.BookingStatus;
 import com.airline.reservation.booking.persistence.BookingRepository;
+import com.airline.reservation.booking.service.policy.CancellationPolicy;
 import com.airline.reservation.common.error.ApiException;
 import com.airline.reservation.common.error.ErrorCode;
 import com.airline.reservation.flight.domain.FlightInstance;
@@ -33,17 +35,20 @@ public class BookingService {
 	private final SeatOccupancyQueries seatOccupancy;
 	private final BookingRequestValidator validator;
 	private final PnrGenerator pnrGenerator;
+	private final CancellationPolicy cancellationPolicy;
 	private final Clock clock;
 
 	public BookingService(BookingRepository bookingRepository, FlightInstanceRepository instanceRepository,
 			AircraftRepository aircraftRepository, SeatOccupancyQueries seatOccupancy,
-			BookingRequestValidator validator, PnrGenerator pnrGenerator, Clock clock) {
+			BookingRequestValidator validator, PnrGenerator pnrGenerator, CancellationPolicy cancellationPolicy,
+			Clock clock) {
 		this.bookingRepository = bookingRepository;
 		this.instanceRepository = instanceRepository;
 		this.aircraftRepository = aircraftRepository;
 		this.seatOccupancy = seatOccupancy;
 		this.validator = validator;
 		this.pnrGenerator = pnrGenerator;
+		this.cancellationPolicy = cancellationPolicy;
 		this.clock = clock;
 	}
 
@@ -90,6 +95,34 @@ public class BookingService {
 		Booking booking = bookingRepository.findWithSeatsByReference(reference)
 				.orElseThrow(() -> new ApiException(ErrorCode.BOOKING_NOT_FOUND, "Booking not found: " + reference));
 		FlightInstance flight = instanceRepository.findById(booking.getFlightInstanceId()).orElseThrow();
+		return BookingResult.from(booking, flight);
+	}
+
+	/**
+	 * Cancels the whole booking and releases its seats in one transaction. Idempotent: cancelling
+	 * an already cancelled booking returns it unchanged.
+	 * <p>
+	 * Lock order is the same as booking: flight row first, then booking rows. The booking is loaded
+	 * only after the lock, so two simultaneous cancellations cannot both see it CONFIRMED and
+	 * both give the seats back.
+	 */
+	@Transactional
+	public BookingResult cancelBooking(String reference) {
+		Long flightId = bookingRepository.findFlightInstanceIdByReference(reference)
+				.orElseThrow(() -> new ApiException(ErrorCode.BOOKING_NOT_FOUND, "Booking not found: " + reference));
+		FlightInstance flight = instanceRepository.findByIdForUpdate(flightId).orElseThrow();
+		Booking booking = bookingRepository.findWithSeatsByReference(reference).orElseThrow();
+
+		if (booking.getStatus() == BookingStatus.CANCELLED) {
+			return BookingResult.from(booking, flight);
+		}
+		Instant now = clock.instant();
+		cancellationPolicy.verifyCancellable(booking, flight, now);
+
+		int released = booking.cancel(now);
+		flight.release(released);
+		log.info("Booking cancelled: reference={} flightInstanceId={} seatsReleased={}", reference, flightId,
+				released);
 		return BookingResult.from(booking, flight);
 	}
 

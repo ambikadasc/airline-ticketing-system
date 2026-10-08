@@ -64,3 +64,11 @@ One line per decision, newest phase last. The reasoning for the major ones is in
 - Booking references are matched exactly as given (PNRs are upper case).
 - A seat conflict is logged at INFO with flight id and seat numbers; passenger names are never logged.
 - The unique-index violation → 409 mapping is added in Phase 6; with the lock in place the index is not reached in these tests.
+
+## Phase 5 – Cancellation
+- Cancellation looks up only the flight id by reference (`findFlightInstanceIdByReference`, no entity), locks the flight, then loads the booking: same lock order as booking, and the booking is never a stale copy.
+- `BookingStatus.canTransitionTo` is the enum state machine (CONFIRMED → CANCELLED; CANCELLED terminal). An illegal transition throws `IllegalStateException` (a bug → 500); the expected case, already cancelled, is returned unchanged by the service first (idempotent 200, nothing released or logged).
+- `CancellationPolicy` has one implementation, `BeforeDepartureCancellationPolicy` (`@Component`, no config switch until a second rule exists); it is called under the lock after the idempotent check.
+- `FlightInstance.release(n)` is guarded by `total_seats`, mirroring `reserve`.
+- The cancel response is the full booking with status CANCELLED; its seats stay listed as a record of what was booked.
+- Concurrency test helpers (start-gate runner, outcome counting, inventory invariant) live in one shared `ConcurrencySupport` used by both concurrency classes. Both classes passed 5 runs in a row.

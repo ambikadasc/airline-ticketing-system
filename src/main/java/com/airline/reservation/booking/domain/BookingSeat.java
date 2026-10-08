@@ -39,6 +39,8 @@ public class BookingSeat {
 
 	private Instant createdAt;
 
+	private Instant releasedAt;
+
 	protected BookingSeat() {
 		// for JPA
 	}
@@ -50,6 +52,16 @@ public class BookingSeat {
 		this.passengerName = passenger.name();
 		this.status = status;
 		this.createdAt = now;
+	}
+
+	/** Frees the seat for other bookings. Returns false if it was already released. */
+	boolean release(Instant now) {
+		if (status == SeatStatus.RELEASED) {
+			return false;
+		}
+		status = SeatStatus.RELEASED;
+		releasedAt = now;
+		return true;
 	}
 
 	public String getSeatNumber() {
@@ -70,6 +82,10 @@ public class BookingSeat {
 
 	public Instant getCreatedAt() {
 		return createdAt;
+	}
+
+	public Instant getReleasedAt() {
+		return releasedAt;
 	}
 
 }

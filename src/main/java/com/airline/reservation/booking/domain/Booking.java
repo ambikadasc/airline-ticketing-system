@@ -40,6 +40,8 @@ public class Booking {
 
 	private Instant createdAt;
 
+	private Instant cancelledAt;
+
 	@OneToMany(mappedBy = "booking", cascade = CascadeType.ALL)
 	@OrderBy("id")
 	private List<BookingSeat> seats = new ArrayList<>();
@@ -64,6 +66,30 @@ public class Booking {
 			booking.seats.add(new BookingSeat(booking, passenger, SeatStatus.ACTIVE, now));
 		}
 		return booking;
+	}
+
+	/**
+	 * Cancels the whole booking: every seat is released (so it can be booked again) and the
+	 * booking keeps its history. Returns the number of seats released, which the caller gives
+	 * back to the flight's available count.
+	 */
+	public int cancel(Instant now) {
+		if (!status.canTransitionTo(BookingStatus.CANCELLED)) {
+			throw new IllegalStateException("Booking " + reference + " cannot be cancelled from " + status);
+		}
+		int released = 0;
+		for (BookingSeat seat : seats) {
+			if (seat.release(now)) {
+				released++;
+			}
+		}
+		status = BookingStatus.CANCELLED;
+		cancelledAt = now;
+		return released;
+	}
+
+	public Instant getCancelledAt() {
+		return cancelledAt;
 	}
 
 	public Long getId() {

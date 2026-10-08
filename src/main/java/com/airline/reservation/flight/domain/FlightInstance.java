@@ -80,6 +80,15 @@ public class FlightInstance {
 		availableSeats -= seats;
 	}
 
+	/** Gives seats back to the available count, e.g. after a cancellation. Called under the row lock. */
+	public void release(int seats) {
+		if (availableSeats + seats > totalSeats) {
+			throw new IllegalStateException(
+					"Cannot release " + seats + " seats on flight " + id + ": only " + (totalSeats - availableSeats) + " taken");
+		}
+		availableSeats += seats;
+	}
+
 	/** A flight can be booked only before it departs. */
 	public boolean isDepartedAt(Instant now) {
 		return !departureAt.isAfter(now);

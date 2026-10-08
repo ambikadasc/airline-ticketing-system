@@ -30,6 +30,25 @@ class FlightInstanceTest {
 	}
 
 	@Test
+	void releasingSeatsRaisesTheAvailableCount() {
+		FlightInstance flight = flightWithSeats(180);
+		flight.reserve(5);
+
+		flight.release(2);
+
+		assertThat(flight.getAvailableSeats()).isEqualTo(177);
+	}
+
+	@Test
+	void cannotReleaseMoreSeatsThanTheAircraftHas() {
+		FlightInstance flight = flightWithSeats(180);
+		flight.reserve(1);
+
+		assertThatIllegalStateException().isThrownBy(() -> flight.release(2));
+		assertThat(flight.getAvailableSeats()).isEqualTo(179);
+	}
+
+	@Test
 	void hasDepartedAtAndAfterTheDepartureTime() {
 		FlightInstance flight = flightWithSeats(180);
 

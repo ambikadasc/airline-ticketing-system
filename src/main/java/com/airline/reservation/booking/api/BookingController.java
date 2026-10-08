@@ -35,6 +35,12 @@ public class BookingController {
 		return ResponseEntity.created(URI.create("/api/v1/bookings/" + booking.bookingReference())).body(booking);
 	}
 
+	@Operation(summary = "Cancel a booking and release its seats (repeating it returns the same result)")
+	@PostMapping("/{reference}/cancel")
+	public BookingResult cancel(@PathVariable String reference) {
+		return bookingService.cancelBooking(reference);
+	}
+
 	@Operation(summary = "Fetch a booking by its reference")
 	@GetMapping("/{reference}")
 	public BookingResult get(@PathVariable String reference) {

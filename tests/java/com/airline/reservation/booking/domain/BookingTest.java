@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import static org.assertj.core.api.Assertions.tuple;
 
 class BookingTest {
@@ -29,6 +30,34 @@ class BookingTest {
 				.containsExactly(
 						tuple("12A", "Ayesha Khan", SeatStatus.ACTIVE, 42L, NOW),
 						tuple("12B", "Bilal Khan", SeatStatus.ACTIVE, 42L, NOW));
+	}
+
+	@Test
+	void cancellingReleasesEverySeatAndReturnsHowMany() {
+		Booking booking = twoSeatBooking();
+		Instant later = NOW.plusSeconds(3600);
+
+		int released = booking.cancel(later);
+
+		assertThat(released).isEqualTo(2);
+		assertThat(booking.getStatus()).isEqualTo(BookingStatus.CANCELLED);
+		assertThat(booking.getCancelledAt()).isEqualTo(later);
+		assertThat(booking.getSeats())
+				.extracting(BookingSeat::getStatus, BookingSeat::getReleasedAt)
+				.containsOnly(tuple(SeatStatus.RELEASED, later));
+	}
+
+	@Test
+	void aCancelledBookingCannotBeCancelledAgain() {
+		Booking booking = twoSeatBooking();
+		booking.cancel(NOW);
+
+		assertThatIllegalStateException().isThrownBy(() -> booking.cancel(NOW));
+	}
+
+	private static Booking twoSeatBooking() {
+		return Booking.confirmed("K7M2QX", 42L,
+				List.of(new PassengerSeat("Ayesha Khan", "12A"), new PassengerSeat("Bilal Khan", "12B")), NOW);
 	}
 
 	@Test
