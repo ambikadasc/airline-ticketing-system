@@ -3,61 +3,151 @@ package com.airline.reservation.common.error;
 import java.util.List;
 import java.util.Map;
 
+import jakarta.servlet.http.HttpServletRequest;
+
+import org.hibernate.exception.ConstraintViolationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.context.request.ServletWebRequest;
 import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.method.annotation.HandlerMethodValidationException;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 
+import tools.jackson.core.JacksonException;
+
+import com.airline.reservation.common.logging.RequestIdFilter;
+
 /**
  * The single place where exceptions become HTTP responses. Every error is an RFC 9457
- * ProblemDetail with an added machine-readable {@code code}.
+ * ProblemDetail ({@code application/problem+json}) with {@code status}, {@code title},
+ * {@code detail}, a machine-readable {@code code} and the {@code requestId}. Responses never carry
+ * stack traces, SQL, constraint or class names.
  * <p>
- * Framework errors (malformed JSON, bean validation, unknown path, wrong method, media type)
- * are handled by the inherited {@link ResponseEntityExceptionHandler} methods;
- * {@link #handleExceptionInternal} adds the code to all of them.
+ * Logging: client errors (4xx) at WARN on one line without a stack trace; a lock timeout (503) at
+ * WARN; any other server error at ERROR with the stack trace.
  */
 @RestControllerAdvice
 public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 
 	private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
+	/** Expected use-case failures: unknown ids, conflicts, broken rules. */
 	@ExceptionHandler(ApiException.class)
-	ResponseEntity<ProblemDetail> handleApiException(ApiException ex) {
-		ProblemDetail problem = ProblemDetail.forStatusAndDetail(ex.getCode().status(), ex.getMessage());
-		problem.setProperty("code", ex.getCode().name());
+	ResponseEntity<ProblemDetail> handleApiException(ApiException ex, HttpServletRequest request) {
+		ProblemDetail problem = problem(ex.getCode(), ex.getMessage());
 		ex.extraProperties().forEach(problem::setProperty);
+		logWarning(request, ex.getCode(), ex.getMessage());
 		return ResponseEntity.status(ex.getCode().status()).body(problem);
 	}
 
-	@ExceptionHandler(Exception.class)
-	ResponseEntity<ProblemDetail> handleUnexpected(Exception ex) {
-		log.error("Unexpected error", ex);
-		ErrorCode code = ErrorCode.INTERNAL_ERROR;
-		ProblemDetail problem = ProblemDetail.forStatusAndDetail(code.status(), "An unexpected error occurred.");
-		problem.setProperty("code", code.name());
-		return ResponseEntity.status(code.status()).body(problem);
+	/**
+	 * A unique constraint stopped a write. The service checks first, so this happens only when two
+	 * requests race; the database constraint is the last line of defence and gives a clean 409.
+	 */
+	@ExceptionHandler(DataIntegrityViolationException.class)
+	ResponseEntity<ProblemDetail> handleDataIntegrity(DataIntegrityViolationException ex, HttpServletRequest request) {
+		String constraint = constraintName(ex);
+		ErrorCode code;
+		String detail;
+		if ("uq_active_seat".equals(constraint)) {
+			code = ErrorCode.SEAT_UNAVAILABLE;
+			detail = "One or more requested seats were just booked by another request";
+		}
+		else if ("uq_schedule_flight_number".equals(constraint)) {
+			code = ErrorCode.DUPLICATE_FLIGHT_NUMBER;
+			detail = "A schedule with this flight number already exists";
+		}
+		else {
+			return handleUnexpected(ex, request);
+		}
+		log.warn("{} {} -> {} (constraint {})", request.getMethod(), request.getRequestURI(), code, constraint);
+		return ResponseEntity.status(code.status()).body(problem(code, detail));
 	}
 
+	/** The flight lock was not granted within lock_timeout (3 s): the flight is busy, try again. */
+	@ExceptionHandler(PessimisticLockingFailureException.class)
+	ResponseEntity<ProblemDetail> handleLockTimeout(PessimisticLockingFailureException ex,
+			HttpServletRequest request) {
+		ErrorCode code = ErrorCode.LOCK_TIMEOUT;
+		String detail = "The flight is busy with other requests; please retry";
+		logWarning(request, code, detail);
+		return ResponseEntity.status(code.status())
+				.header(HttpHeaders.RETRY_AFTER, "1")
+				.body(problem(code, detail));
+	}
+
+	/** Anything else is a bug: full stack trace in the log, a generic message to the client. */
+	@ExceptionHandler(Exception.class)
+	ResponseEntity<ProblemDetail> handleUnexpected(Exception ex, HttpServletRequest request) {
+		log.error("{} {} -> unexpected error", request.getMethod(), request.getRequestURI(), ex);
+		ErrorCode code = ErrorCode.INTERNAL_ERROR;
+		return ResponseEntity.status(code.status()).body(problem(code, "An unexpected error occurred"));
+	}
+
+	/**
+	 * Framework errors (malformed JSON, bean or parameter validation, unknown path, wrong method,
+	 * media type) arrive here from the inherited handlers. Adds the code, request id and, where
+	 * needed, a safe detail.
+	 */
 	@Override
 	protected ResponseEntity<Object> handleExceptionInternal(Exception ex, Object body, HttpHeaders headers,
 			HttpStatusCode statusCode, WebRequest request) {
+		ErrorCode code = codeFor(statusCode);
 		ProblemDetail problem = body instanceof ProblemDetail detail ? detail : ProblemDetail.forStatus(statusCode);
-		problem.setProperty("code", codeFor(statusCode).name());
+		problem.setProperty("code", code.name());
+		addRequestId(problem);
+		if (ex instanceof HttpMessageNotReadableException) {
+			problem.setDetail(malformedBodyDetail(ex));
+		}
+		else if (code == ErrorCode.RESOURCE_NOT_FOUND || problem.getDetail() == null) {
+			problem.setDetail(defaultDetail(code));
+		}
 		if (ex instanceof MethodArgumentNotValidException invalid) {
 			problem.setProperty("errors", fieldErrors(invalid));
 		}
 		else if (ex instanceof HandlerMethodValidationException invalid) {
 			problem.setProperty("errors", parameterErrors(invalid));
 		}
+
+		HttpServletRequest servletRequest = ((ServletWebRequest) request).getRequest();
+		if (statusCode.is5xxServerError()) {
+			log.error("{} {} -> {}", servletRequest.getMethod(), servletRequest.getRequestURI(), code, ex);
+		}
+		else {
+			logWarning(servletRequest, code, problem.getDetail());
+		}
 		return super.handleExceptionInternal(ex, problem, headers, statusCode, request);
+	}
+
+	// ---------------------------------------------------------------------------------------
+
+	private static ProblemDetail problem(ErrorCode code, String detail) {
+		ProblemDetail problem = ProblemDetail.forStatusAndDetail(code.status(), detail);
+		problem.setProperty("code", code.name());
+		addRequestId(problem);
+		return problem;
+	}
+
+	private static void addRequestId(ProblemDetail problem) {
+		String requestId = MDC.get(RequestIdFilter.MDC_KEY);
+		if (requestId != null) {
+			problem.setProperty("requestId", requestId);
+		}
+	}
+
+	private static void logWarning(HttpServletRequest request, ErrorCode code, String detail) {
+		log.warn("{} {} -> {}: {}", request.getMethod(), request.getRequestURI(), code, detail);
 	}
 
 	private static ErrorCode codeFor(HttpStatusCode status) {
@@ -68,6 +158,56 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 			case 415 -> ErrorCode.UNSUPPORTED_MEDIA_TYPE;
 			default -> status.is4xxClientError() ? ErrorCode.VALIDATION_ERROR : ErrorCode.INTERNAL_ERROR;
 		};
+	}
+
+	private static String defaultDetail(ErrorCode code) {
+		return switch (code) {
+			case RESOURCE_NOT_FOUND -> "No endpoint matches this path";
+			case METHOD_NOT_ALLOWED -> "This HTTP method is not supported on this path";
+			case NOT_ACCEPTABLE -> "The response can only be produced as JSON";
+			case UNSUPPORTED_MEDIA_TYPE -> "The request body must be application/json";
+			case VALIDATION_ERROR -> "The request is invalid";
+			default -> "An unexpected error occurred";
+		};
+	}
+
+	/**
+	 * Our own text for an unreadable body. Jackson's message can name internal classes, so it is never
+	 * shown; only the path of the offending field, e.g. {@code daysOfOperation[2]}.
+	 */
+	private static String malformedBodyDetail(Exception ex) {
+		for (Throwable cause = ex.getCause(); cause != null; cause = cause.getCause()) {
+			if (cause instanceof JacksonException jackson && !jackson.getPath().isEmpty()) {
+				return "Invalid value for field '" + fieldPath(jackson.getPath()) + "'";
+			}
+		}
+		return "The request body is not valid JSON";
+	}
+
+	private static String fieldPath(List<JacksonException.Reference> path) {
+		StringBuilder field = new StringBuilder();
+		for (JacksonException.Reference reference : path) {
+			if (reference.getPropertyName() != null) {
+				if (!field.isEmpty()) {
+					field.append('.');
+				}
+				field.append(reference.getPropertyName());
+			}
+			else if (reference.getIndex() >= 0) {
+				field.append('[').append(reference.getIndex()).append(']');
+			}
+		}
+		return field.toString();
+	}
+
+	/** The name of the violated constraint, as reported by Hibernate; null if there is none. */
+	private static String constraintName(DataIntegrityViolationException ex) {
+		for (Throwable cause = ex; cause != null; cause = cause.getCause()) {
+			if (cause instanceof ConstraintViolationException violation) {
+				return violation.getConstraintName();
+			}
+		}
+		return null;
 	}
 
 	private static List<Map<String, String>> fieldErrors(MethodArgumentNotValidException ex) {

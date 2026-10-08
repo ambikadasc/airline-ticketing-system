@@ -321,5 +321,6 @@ Not built; each step is listed with the signal that would justify it.
 | 2026-10-07 | Initial design |
 | 2026-10-08 | Phase 2: `ApiException` is one concrete class carrying an `ErrorCode`; subclasses only for errors with extra fields (LLD §2) |
 | 2026-10-08 | Phase 3: search adds back seats on overdue holds with a second grouped query, not a correlated subquery (HLD §8, LLD §8) |
+| 2026-10-08 | Phase 6: incoming `X-Request-Id` accepted only if safe (≤ 64 chars, `[A-Za-z0-9._-]`), else a UUID (LLD §2) |
 | 2026-10-08 | Phase 4b: `hold_expires_at` is kept after a hold ends (ER diagram and schema snapshot wording); hold expiry rounded to whole seconds; expiry flushes before the SQL seat check (LLD §8) |
 | 2026-10-08 | Phase 4: the booking seat-conflict check reuses `SeatOccupancyQueries.takenSeats`, so seat map, search and booking share one definition of a taken seat (LLD §2, §7) |

@@ -29,6 +29,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -119,7 +120,11 @@ class SeatHoldTest extends IntegrationTest {
 
 		confirm(reference)
 				.andExpect(status().isConflict())
-				.andExpect(jsonPath("$.code").value("HOLD_EXPIRED"));
+				.andExpect(content().contentType("application/problem+json"))
+				.andExpect(jsonPath("$.code").value("HOLD_EXPIRED"))
+				.andExpect(jsonPath("$.title").isNotEmpty())
+				.andExpect(jsonPath("$.detail").isNotEmpty())
+				.andExpect(jsonPath("$.requestId").isNotEmpty());
 	}
 
 	@Test

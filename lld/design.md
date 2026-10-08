@@ -67,7 +67,7 @@ shape are the same today. Request records stay in `api` and map to `*Command` re
 | Subclasses | Only where a response carries extra fields: `SeatUnavailableException` (`unavailableSeats`), `InvalidSeatException` (`invalidSeats`) |
 | `ErrorCode` | Enum of every code with its HTTP status (§6) |
 | `GlobalExceptionHandler` | `@RestControllerAdvice` extending `ResponseEntityExceptionHandler`; the single place errors become responses |
-| `RequestIdFilter` | Reads `X-Request-Id` or generates a UUID; puts it in the MDC as `requestId`; echoes it in the response header; clears the MDC afterwards |
+| `RequestIdFilter` | Reads `X-Request-Id` and keeps it only if it matches `^[A-Za-z0-9._-]{1,64}$` (no log injection), otherwise generates a UUID; puts it in the MDC as `requestId`; echoes it in the response header; clears the MDC afterwards. The log pattern prints it on every line |
 
 ### airport, aircraft
 | Class | Responsibility |

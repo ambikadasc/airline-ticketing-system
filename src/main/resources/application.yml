@@ -22,6 +22,11 @@ spring:
   flyway:
     locations: classpath:db/migration
 
+logging:
+  pattern:
+    # Every log line carries the request id (set by RequestIdFilter); empty outside a request.
+    level: "%5p [%X{requestId:-}]"
+
 airline:
   booking-window-days: 365
   max-seats-per-booking: 9
