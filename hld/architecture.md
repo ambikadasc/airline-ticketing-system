@@ -319,3 +319,4 @@ Not built; each step is listed with the signal that would justify it.
 | Date | Change |
 | --- | --- |
 | 2026-10-07 | Initial design |
+| 2026-10-08 | Phase 2: `ApiException` is one concrete class carrying an `ErrorCode`; subclasses only for errors with extra fields (LLD §2) |

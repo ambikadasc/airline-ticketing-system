@@ -2,9 +2,6 @@ package com.airline.reservation;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.context.annotation.Import;
-import org.springframework.jdbc.core.JdbcTemplate;
 
 import com.airline.reservation.aircraft.Aircraft;
 import com.airline.reservation.aircraft.AircraftRepository;
@@ -17,12 +14,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * The migrations create the schema and seed the reference data, and the entities map onto it
  * (the context only starts if ddl-auto=validate accepts them).
  */
-@Import(TestcontainersConfiguration.class)
-@SpringBootTest
-class ReferenceDataTest {
-
-	@Autowired
-	private JdbcTemplate jdbcTemplate;
+class ReferenceDataTest extends IntegrationTest {
 
 	@Autowired
 	private AirportRepository airportRepository;

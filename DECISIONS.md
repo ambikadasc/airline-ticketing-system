@@ -35,3 +35,13 @@ One line per decision, newest phase last. The reasoning for the major ones is in
 - Read-only repositories extend Spring Data's bare `Repository` and declare only the finders in use, so seeded data has no save or delete methods.
 - `SeatLayout` validates its own invariants (rows 1–99, distinct letters A–Z); duplicate letters are checked only in Java.
 - `SeatLayout.contains` is case-sensitive and does not trim; normalising seat input is the booking validator's job, so it happens in one place.
+
+## Phase 2 – Schedules and instance generation
+- `ApiException` is one concrete class carrying an `ErrorCode` (which holds the HTTP status); subclasses only when a response carries extra fields. `ErrorCode` gains constants in the phase that first uses them.
+- The handler skeleton adds `code` to every framework error by status (400 → `VALIDATION_ERROR`, 404 → `RESOURCE_NOT_FOUND`, 405/406/415) and an `errors` list for bean-validation failures; Phase 6 completes it.
+- The instance window is [today, today + 365], 366 dates, both ends inclusive; today's instance is created even if it has already departed (search and booking filter departed flights).
+- An arrival time equal to the departure time is treated as next-day (offset 1).
+- Schedule times are returned as `HH:mm` (`@JsonFormat`), matching the request format; Jackson 3's default would add seconds.
+- `FlightInstanceBulkWriter` inserts in JDBC batches of 500 with `ON CONFLICT DO NOTHING` and returns the rows actually inserted.
+- `findByIdForUpdate` and `FlightInstance` behaviour (`reserve`, `release`, `isDepartedAt`) are deferred to the phases that use and test them.
+- All integration tests extend one `IntegrationTest` base (one Spring context, one PostgreSQL container); each test starts from truncated transactional tables.

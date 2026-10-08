@@ -13,7 +13,7 @@ com.airline.reservation
 ├── AirlineReservationApplication      main(): TimeZone UTC, @EnableScheduling
 ├── common/
 │   ├── config/       ClockConfig, AirlineProperties
-│   ├── error/        ApiException (+ subclasses), ErrorCode, GlobalExceptionHandler
+│   ├── error/        ApiException (+ subclasses that carry extra fields), ErrorCode, GlobalExceptionHandler
 │   └── logging/      RequestIdFilter
 ├── airport/          Airport, AirportRepository
 ├── aircraft/         Aircraft, SeatLayout, AircraftRepository
@@ -63,8 +63,8 @@ shape are the same today. Request records stay in `api` and map to `*Command` re
 | --- | --- |
 | `ClockConfig` | `@Bean Clock clock()` → `Clock.systemUTC()`. Tests replace it with a fixed `@Primary` clock |
 | `AirlineProperties` | `@ConfigurationProperties("airline")` record: `bookingWindowDays` (365), `maxSeatsPerBooking` (9), `instanceJobCron`, `seatHold { enabled=false, ttl=PT10M }` |
-| `ApiException` | Abstract `RuntimeException` carrying an `ErrorCode` and optional extra properties (e.g. `unavailableSeats`) |
-| Subclasses | `NotFoundException`, `InvalidRequestException` (400 VALIDATION_ERROR), `InvalidSeatException`, `OutsideBookingWindowException`, `SeatUnavailableException`, `ConflictException` (code given) |
+| `ApiException` | Concrete `RuntimeException(ErrorCode, detail)`. The `ErrorCode` already carries the HTTP status, so one class covers every not-found, conflict and validation case: `new ApiException(ErrorCode.AIRPORT_NOT_FOUND, "Airport not found: XXX")` |
+| Subclasses | Only where a response carries extra fields: `SeatUnavailableException` (`unavailableSeats`), `InvalidSeatException` (`invalidSeats`) |
 | `ErrorCode` | Enum of every code with its HTTP status (§6) |
 | `GlobalExceptionHandler` | `@RestControllerAdvice` extending `ResponseEntityExceptionHandler`; the single place errors become responses |
 | `RequestIdFilter` | Reads `X-Request-Id` or generates a UUID; puts it in the MDC as `requestId`; echoes it in the response header; clears the MDC afterwards |
@@ -79,7 +79,7 @@ shape are the same today. Request records stay in `api` and map to `*Command` re
 ### schedule
 | Class | Responsibility |
 | --- | --- |
-| `FlightSchedule` | Entity. Static factory `create(flightNumber, origin, destination, departureTime, arrivalTime, aircraftId, days, createdAt)` derives `arrivalDayOffset` (1 if arrival ≤ departure, else 0). `daysOfOperation` is a `Set<DayOfWeek>` `@ElementCollection` on `flight_schedule_day`. No setters (schedules are immutable) |
+| `FlightSchedule` | Entity. Static factory `create(flightNumber, origin, destination, departureTime, arrivalTime, aircraftId, days, createdAt)` derives `arrivalDayOffset` (1 if arrival ≤ departure, else 0). `operatesOn(DayOfWeek)` answers the generator. `daysOfOperation` is a `Set<DayOfWeek>` `@ElementCollection` on `flight_schedule_day`. No setters (schedules are immutable) |
 | `FlightInstanceGenerator` | Pure logic, no Spring or DB. `static List<FlightInstance> generate(FlightSchedule, SeatLayout, LocalDate from, LocalDate to)`: one instance per date in `[from, to]` whose day of week is an operating day; `departure_at = date + departureTime (UTC)`, `arrival_at = date + offset + arrivalTime (UTC)` |
 | `ScheduleService` | `createSchedule(command)`, `getSchedule(id)`, `extendInstanceWindow()` (§7) |
 | `InstanceWindowJob` | `@Scheduled(cron = "${airline.instance-job-cron}", zone = "UTC")` and `ApplicationRunner`; both call `ScheduleService.extendInstanceWindow()` and log the inserted count |

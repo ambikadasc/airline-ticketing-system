@@ -5,16 +5,12 @@ import java.time.Duration;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.context.annotation.Import;
 
 import com.airline.reservation.common.config.AirlineProperties;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@Import(TestcontainersConfiguration.class)
-@SpringBootTest
-class AirlineReservationApplicationTests {
+class AirlineReservationApplicationTests extends IntegrationTest {
 
 	@Autowired
 	private Clock clock;
