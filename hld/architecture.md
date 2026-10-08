@@ -223,8 +223,8 @@ Source: [`diagrams/booking-state.mmd`](diagrams/booking-state.mmd)
   counter restored. It runs under the flight lock, so it cannot race with a confirm or a new
   booking.
 - **Reads never write; they compute around overdue holds:** the seat map shows a seat on an
-  overdue hold as `AVAILABLE`; search adds seats on overdue holds back to the counter (a
-  correlated count in the same search query); `GET /bookings/{reference}` reports an overdue
+  overdue hold as `AVAILABLE`; search adds seats on overdue holds back to the counter (one
+  grouped count query after the instance search); `GET /bookings/{reference}` reports an overdue
   `HELD` booking as `EXPIRED`.
 - **The flag is read in one place**, the configuration that picks the `BookingPolicy`. Expiry
   and the read rules above run regardless: with the flag off there are never `HELD` rows, so they
@@ -320,3 +320,4 @@ Not built; each step is listed with the signal that would justify it.
 | --- | --- |
 | 2026-10-07 | Initial design |
 | 2026-10-08 | Phase 2: `ApiException` is one concrete class carrying an `ErrorCode`; subclasses only for errors with extra fields (LLD §2) |
+| 2026-10-08 | Phase 3: search adds back seats on overdue holds with a second grouped query, not a correlated subquery (HLD §8, LLD §8) |

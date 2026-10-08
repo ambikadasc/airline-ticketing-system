@@ -13,6 +13,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.WebRequest;
+import org.springframework.web.method.annotation.HandlerMethodValidationException;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 
 /**
@@ -52,6 +53,9 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 		if (ex instanceof MethodArgumentNotValidException invalid) {
 			problem.setProperty("errors", fieldErrors(invalid));
 		}
+		else if (ex instanceof HandlerMethodValidationException invalid) {
+			problem.setProperty("errors", parameterErrors(invalid));
+		}
 		return super.handleExceptionInternal(ex, problem, headers, statusCode, request);
 	}
 
@@ -68,6 +72,15 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 	private static List<Map<String, String>> fieldErrors(MethodArgumentNotValidException ex) {
 		return ex.getBindingResult().getFieldErrors().stream()
 				.map(error -> Map.of("field", error.getField(), "message", String.valueOf(error.getDefaultMessage())))
+				.toList();
+	}
+
+	/** Constraint failures on request parameters, e.g. a malformed airport code in a query string. */
+	private static List<Map<String, String>> parameterErrors(HandlerMethodValidationException ex) {
+		return ex.getParameterValidationResults().stream()
+				.flatMap(result -> result.getResolvableErrors().stream()
+						.map(error -> Map.of("field", String.valueOf(result.getMethodParameter().getParameterName()),
+								"message", String.valueOf(error.getDefaultMessage()))))
 				.toList();
 	}
 

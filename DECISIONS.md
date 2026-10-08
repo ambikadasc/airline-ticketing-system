@@ -45,3 +45,11 @@ One line per decision, newest phase last. The reasoning for the major ones is in
 - `FlightInstanceBulkWriter` inserts in JDBC batches of 500 with `ON CONFLICT DO NOTHING` and returns the rows actually inserted.
 - `findByIdForUpdate` and `FlightInstance` behaviour (`reserve`, `release`, `isDepartedAt`) are deferred to the phases that use and test them.
 - All integration tests extend one `IntegrationTest` base (one Spring context, one PostgreSQL container); each test starts from truncated transactional tables.
+
+## Phase 3 – Search and seat map
+- Search adds back seats on overdue holds with a second, grouped query for the instances found (not a correlated subquery): `flight` reaches `booking_seat` only through SQL, and this avoids a persistence-layer row type.
+- Hold-aware reads (seat map BOOKED for live holds only; search count) are built and tested now with SQL fixtures; Phase 4b adds only the write side.
+- Seat-map `availableSeats` is total seats minus the taken seats in the same response, so the number always matches the list.
+- Departed flights still have a seat map (read by id); search hides them and booking rejects them.
+- Query-parameter constraint failures (`HandlerMethodValidationException`) also return an `errors` list, with the parameter name as `field`.
+- The seat-map availability enum is `SeatAvailability { AVAILABLE, BOOKED }`, named apart from booking's `SeatStatus`.

@@ -91,9 +91,9 @@ shape are the same today. Request records stay in `api` and map to `*Command` re
 | `FlightInstance` | Entity. `reserve(int n)` (throws if fewer than `n` available), `release(int n)`, `isDepartedAt(Instant now)`. Holds `scheduleId`/`aircraftId` as plain `Long` (no JPA associations across aggregates). Static factory `scheduled(...)` used by the generator |
 | `FlightInstanceRepository` | Spring Data. `findByIdForUpdate(id)` (`@Lock(PESSIMISTIC_WRITE)`, JPQL); search query by origin, destination, date, `departure_at > now`, ordered by departure |
 | `FlightInstanceBulkWriter` | `JdbcTemplate.batchUpdate` of `INSERT ... ON CONFLICT (schedule_id, flight_date) DO NOTHING`; returns rows actually inserted |
-| `SeatOccupancyQueries` | Read-only SQL over `booking_seat`/`booking` (JdbcTemplate): `takenSeats(instanceId, now)` for the seat map; overdue-hold seat counts for search (§8) |
-| `FlightSearchService` | `search(origin, destination, date)` |
-| `SeatMapService` | `getSeatMap(flightInstanceId)` |
+| `SeatOccupancyQueries` | Read-only SQL over `booking_seat`/`booking` (`NamedParameterJdbcTemplate`): `takenSeats(instanceId, now)` for the seat map; `seatsOnOverdueHolds(instanceIds, now)`, one grouped count for search (§8) |
+| `FlightSearchService` | `search(origin, destination, date)`: origin ≠ destination, date inside the window, airports exist; then the indexed search plus the overdue-hold count |
+| `SeatMapService` | `getSeatMap(flightInstanceId)`: walks `SeatLayout.seats()` against `takenSeats`; `availableSeats` = total − taken in the same response. Departed flights still have a seat map |
 | `FlightController` | `GET /api/v1/flights`, `GET /api/v1/flights/{id}/seats` |
 
 ### booking
@@ -392,8 +392,10 @@ with it off there are no `HELD` rows, so each one reduces to the plain behaviour
 - **Seat map:** a seat is `BOOKED` if its `booking_seat` row is `ACTIVE`, or `HELD` and its
   booking's `hold_expires_at > now`; otherwise `AVAILABLE`.
 - **Search:** `availableSeats = available_seats + (seats on HELD bookings of that instance with
-  hold_expires_at <= now)`, computed as a correlated count in the search query. It uses the
-  `uq_active_seat` index, which covers `HELD` rows.
+  hold_expires_at <= now)`. Two indexed queries: the instance search, then one grouped count
+  (`SeatOccupancyQueries.seatsOnOverdueHolds`) for the instances found. The count reaches
+  `booking_seat` with SQL because `flight` must not import `booking` code; with the flag off it
+  returns nothing. It uses the `uq_active_seat` index, which covers `HELD` rows.
 - **Fetch booking:** `status = booking.effectiveStatus(now)`.
 
 ## 9. Logging
