@@ -55,7 +55,7 @@ One line per decision, newest phase last. The reasoning for the major ones is in
 - The seat-map availability enum is `SeatAvailability { AVAILABLE, BOOKED }`, named apart from booking's `SeatStatus`.
 
 ## Phase 4 – Booking
-- **Race test shown failing, then passing (A5/A8).** 50 threads book seat 12A on one flight at once. With the flight lock replaced by a plain read *and* `uq_active_seat` commented out of V3: **10 successes out of 50, in each of 3 runs** (10 = the connection-pool size: every transaction that ran concurrently booked the seat). With `findByIdForUpdate` and the index restored (V3 byte-identical, `git diff` empty): **exactly 1 success, 49 `SeatUnavailableException`, in each of 3 runs.** The broken state was never committed.
+- **Race test shown failing, then passing.** 50 threads book seat 12A on one flight at once. With the flight lock replaced by a plain read *and* `uq_active_seat` commented out of V3: **10 successes out of 50, in each of 3 runs** (10 = the connection-pool size: every transaction that ran concurrently booked the seat). With `findByIdForUpdate` and the index restored (V3 byte-identical, `git diff` empty): **exactly 1 success, 49 `SeatUnavailableException`, in each of 3 runs.** The broken state was never committed.
 - The concurrency class (same seat ×50, 50 different seats, overlapping 1A+1B / 1B+1C ×20) passed 5 runs in a row; after each scenario the counter equals total minus active seats and no seat is active twice.
 - The seat-conflict check reuses `SeatOccupancyQueries.takenSeats`: one definition of a taken seat for seat map, search and booking.
 - `BookingPolicy`, HELD/EXPIRED and confirm are deferred to Phase 4b; `BookingStatus`/`SeatStatus` gain constants in the phase that uses them.
@@ -95,5 +95,12 @@ One line per decision, newest phase last. The reasoning for the major ones is in
 ## Phase 7 – Hardening
 - Edge cases covered through the API (`EdgeCasesTest`): the last day of the window (today + 365) is searchable and bookable, today + 366 is rejected; an overnight flight shows next-day arrival and is bookable; a schedule created late in the day generates today's (already departed) instance, which search hides and booking rejects; the last free seat can be booked, after which the flight shows 0 available and a further booking is a 409; a request including taken seats books nothing.
 - A full flight stays in search results with `availableSeats: 0` (hiding it would be filtering beyond the brief).
-- The smoke test (base plan section 12) is committed as `scripts/smoke-test.sh`: bash and curl only, the date computed (next Monday at least a day ahead), PASS/FAIL per step, non-zero exit at the first failure; it needs a fresh database. Run with `bash scripts/smoke-test.sh` (git does not record the executable bit here, `core.filemode=false`).
+- The end-to-end smoke test is committed as `scripts/smoke-test.sh`: bash and curl only, the date computed (next Monday at least a day ahead), PASS/FAIL per step, non-zero exit at the first failure; it needs a fresh database. Run with `bash scripts/smoke-test.sh` (git does not record the executable bit here, `core.filemode=false`).
 - `./mvnw clean verify` passed three times in a row (298 tests, about 40 s each); the smoke test passed all 10 checks on a fresh Compose stack, and failed cleanly (exit 1 at step 1) when re-run on a used database.
+
+## Phase 8 – Documentation
+- README follows the brief's required sections (setup with dependencies/build/run/database initialization, design decisions, search, booking and cancellation algorithms, assumptions), plus API walkthrough, design principles and patterns, scaling and evolution (including a multiple-airlines summary), testing approach, repository layout and an AI-assistance note.
+- Six decision records in `docs/adr/` (instances, concurrency, seat hold, package by feature, no authentication, PostgreSQL and engine-specific features).
+- `db/schema.sql` stays the commented snapshot rather than raw `pg_dump` output (which drops the comments); it was re-verified identical to a migrated database (`pg_dump --schema-only`, 45 CREATE/ALTER statements).
+- `hld/architecture.pdf` generated with md-to-pdf, pointed at the headless Chrome already installed for the diagrams (16 pages, the 5 diagrams embedded).
+- Every relative link and anchor in README, HLD, LLD and ADRs resolves (44 checked); every README command was executed as written (Compose run, developer run, seat-hold run, smoke test, build).

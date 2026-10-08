@@ -1,9 +1,13 @@
 -- =============================================================================
 -- Airline reservation system: consolidated schema (PostgreSQL 16)
 --
--- Design snapshot. The executable source of truth is db/migrations (Flyway);
--- this file is the same DDL in one place for reading. Seed data (airports,
--- aircraft) lives in its own migration and is not repeated here.
+-- The executable source of truth is db/migrations (Flyway); this file is the same
+-- DDL in one place, with comments, for reading. Seed data (airports, aircraft)
+-- lives in its own migration and is not repeated here.
+--
+-- Verified identical to a database migrated with V1-V4: `pg_dump --schema-only`
+-- of both gives the same tables, constraints and indexes. (A raw pg_dump is not
+-- used as this file because it drops the comments below.)
 --
 -- PostgreSQL-specific features used (each commented where it appears):
 --   * partial unique index        (uq_active_seat)

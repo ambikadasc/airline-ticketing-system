@@ -2,7 +2,8 @@
 
 Companion to [`hld/architecture.md`](../hld/architecture.md). The schema is in
 [`db/schema.sql`](../db/schema.sql) and the ER diagram in
-[`hld/diagrams/er.png`](../hld/diagrams/er.png).
+[`hld/diagrams/er.png`](../hld/diagrams/er.png). How to run it: [README](../README.md);
+decision records: [`docs/adr`](../docs/adr/).
 
 ## 1. Modules and package layout
 
@@ -61,12 +62,12 @@ shape are the same today. Request records stay in `api` and map to `*Command` re
 ### common
 | Class | Responsibility |
 | --- | --- |
-| `ClockConfig` | `@Bean Clock clock()` → `Clock.systemUTC()`. Tests replace it with a fixed `@Primary` clock |
+| `ClockConfig` | `@Bean Clock clock()` → `Clock.systemUTC()`. Tests replace it with a `@Primary` `MutableClock` that stands still at 2026-01-05T00:00Z until a test moves it |
 | `AirlineProperties` | `@ConfigurationProperties("airline")` record: `bookingWindowDays` (365), `maxSeatsPerBooking` (9), `instanceJobCron`, `seatHold { enabled=false, ttl=PT10M }` |
 | `ApiException` | Concrete `RuntimeException(ErrorCode, detail)`. The `ErrorCode` already carries the HTTP status, so one class covers every not-found, conflict and validation case: `new ApiException(ErrorCode.AIRPORT_NOT_FOUND, "Airport not found: XXX")` |
 | Subclasses | Only where a response carries extra fields: `SeatUnavailableException` (`unavailableSeats`), `InvalidSeatException` (`invalidSeats`) |
 | `ErrorCode` | Enum of every code with its HTTP status (§6) |
-| `GlobalExceptionHandler` | `@RestControllerAdvice` extending `ResponseEntityExceptionHandler`; the single place errors become responses |
+| `GlobalExceptionHandler` | `@RestControllerAdvice` extending `ResponseEntityExceptionHandler`; the single place errors become responses (§6) and are logged by status (§9) |
 | `RequestIdFilter` | Reads `X-Request-Id` and keeps it only if it matches `^[A-Za-z0-9._-]{1,64}$` (no log injection), otherwise generates a UUID; puts it in the MDC as `requestId`; echoes it in the response header; clears the MDC afterwards. The log pattern prints it on every line |
 
 ### airport, aircraft
@@ -104,9 +105,9 @@ shape are the same today. Request records stay in `api` and map to `*Command` re
 | `BookingStatus` | Enum `HELD, CONFIRMED, CANCELLED, EXPIRED` with `canTransitionTo(target)` (§3) |
 | `SeatStatus` | Enum `ACTIVE, HELD, RELEASED` |
 | `BookingRepository` | `findFlightInstanceIdByReference(ref)` (returns `Optional<Long>`, no entity load), `findWithSeatsByReference(ref)` (join fetch), `findOverdueHolds(instanceId, now)`, `existsByReference(ref)`. The seat-conflict check does not live here: it reuses `SeatOccupancyQueries.takenSeats` (flight), the same "taken" rule as the seat map |
-| `BookingPolicy` | Interface, the Strategy: `Booking newBooking(String reference, long flightInstanceId, List<PassengerSeat> passengers, Instant now)` |
+| `BookingPolicy` | Interface, the Strategy: `Booking newBooking(String reference, Long flightInstanceId, List<PassengerSeat> passengers, Instant now)` |
 | `ImmediateConfirmationPolicy` | Returns `Booking.confirmed(...)` |
-| `SeatHoldPolicy` | Returns `Booking.held(..., now.plus(ttl))` |
+| `SeatHoldPolicy` | Returns `Booking.held(..., now.plus(ttl))`, the expiry rounded down to whole seconds |
 | `BookingPolicyConfig` | `@Bean BookingPolicy` chosen by `airline.seat-hold.enabled`; **the only place the flag is read** |
 | `CancellationPolicy` | Interface, the Strategy for "may this booking be cancelled now?": `void verifyCancellable(Booking booking, FlightInstance flight, Instant now)`; throws `409 BOOKING_NOT_CANCELLABLE` if not. Called under the flight lock, after the booking is loaded |
 | `BeforeDepartureCancellationPolicy` | The only implementation today (`@Component`): cancellable while `flight.isDepartedAt(now)` is false. A new rule (cut-off window, admin override) is a new implementation; locking, transaction and schema are untouched |
@@ -333,8 +334,12 @@ duplicate flight number) are `409`.
 - `DataIntegrityViolationException` by constraint name: `uq_active_seat` → 409
   `SEAT_UNAVAILABLE`; `uq_schedule_flight_number` → 409 `DUPLICATE_FLIGHT_NUMBER`; anything else
   → 500.
-- `PessimisticLockingFailureException` (includes lock timeouts) → 503 `LOCK_TIMEOUT`.
-- Any other `Exception` → 500 `INTERNAL_ERROR`.
+- `PessimisticLockingFailureException` (includes lock timeouts) → 503 `LOCK_TIMEOUT` with
+  `Retry-After: 1`.
+- Any other `Exception` → 500 `INTERNAL_ERROR` with the generic detail "An unexpected error occurred".
+- `detail` is never empty: Spring's text is kept when present and safe; ours replaces it when
+  missing, for unknown paths ("No endpoint matches this path") and for malformed JSON
+  ("Invalid value for field 'daysOfOperation[2]'", built from Jackson's field path).
 
 ## 7. Transaction boundaries and lock order
 
@@ -416,10 +421,16 @@ Error logging is by status class, in `GlobalExceptionHandler`:
 
 ## 10. Testing approach
 
-| Level | What | How |
+298 tests, all run by `./mvnw verify`. Integration tests extend one `IntegrationTest` base: one
+Spring context and one PostgreSQL 16 container (Testcontainers, real Flyway migrations), tables
+truncated before each test, a `MutableClock` reset to 2026-01-05T00:00Z, and no `@Transactional`
+on tests (they must see committed data).
+
+| Level | Classes | What |
 | --- | --- | --- |
-| Unit (test-first) | `SeatLayout`, `FlightInstanceGenerator` (weekdays, inclusive window ends, leap day, overnight), `BookingStatus` transitions, `Booking` hold expiry, `PnrGenerator` | Plain JUnit 5 + AssertJ, no Spring |
-| Integration | Each endpoint's happy path and every reachable error code; cancel-then-rebook; window job re-run inserts 0 | `@SpringBootTest` + MockMvc on a Testcontainers `postgres:16` with the real Flyway migrations; fixed `Clock` at 2026-01-05T00:00Z; tables truncated in `@BeforeEach`; no `@Transactional` on tests |
-| Concurrency | 50 threads / one seat → exactly 1 success; 50 threads / 50 seats; overlapping 1A+1B vs 1B+1C; 10 concurrent cancels; cancel vs book loop. After each: counter invariant and no duplicate live seat | `ExecutorService` + `CountDownLatch` start gate calling `BookingService` directly; shown to fail with the lock and index removed |
-| Seat hold on | Hold → confirm; hold → expire (advance clock) → another customer books; confirm after expiry → 409; confirm-vs-expiry race | Separate test class with `airline.seat-hold.enabled=true` and a mutable test clock |
-| Architecture | Controllers do not access repositories; `..api..` not used by service/domain/persistence; no package cycles | ArchUnit |
+| Unit (test-first) | `SeatLayoutTest`, `FlightInstanceGeneratorTest`, `FlightScheduleTest`, `FlightInstanceTest`, `BookingTest`, `BookingHoldTest`, `BookingStatusTest`, `BookingRequestValidatorTest`, `PnrGeneratorTest`, `BookingPolicyTest`, `BeforeDepartureCancellationPolicyTest`, `GlobalExceptionHandlerTest` | Pure logic without Spring: seat labels and validity; weekdays, inclusive window ends, leap day, overnight; the full status-transition table; hold expiry; validation rules; constraint-name mapping |
+| API (MockMvc) | `ScheduleApiTest`, `FlightSearchApiTest`, `SeatMapApiTest`, `BookingApiTest`, `BookingCancellationApiTest`, `InstanceWindowJobTest`, `ReferenceDataTest`, `EdgeCasesTest` | Every endpoint and response field; all-or-nothing booking; cancel then rebook; window job idempotent and gap-filling; window ends, overnight, late-day creation, last free seat |
+| Error contract | `ErrorContractTest`, `LockTimeoutTest`, `RequestIdFilterTest` | All 21 reachable error codes share one shape and leak nothing; lock timeout → 503 with `Retry-After`; request ids |
+| Concurrency | `BookingConcurrencyTest`, `CancellationConcurrencyTest`, `DuplicateFlightNumberRaceTest` (helpers in `ConcurrencySupport`) | 50 threads on one seat → exactly 1 success; 50 seats; overlapping 1A+1B vs 1B+1C; 10 concurrent cancels; cancel vs book; duplicate flight number never 500. After each: counter invariant and no seat taken twice. Shown to fail with the lock and index removed (10 of 50 succeeded) |
+| Seat hold on | `SeatHoldTest` (own context, `airline.seat-hold.enabled=true`) | Hold → confirm; expiry frees seats for the next customer; confirm after expiry → 409; confirm-vs-expiry race decided by the clock |
+| Architecture | `ArchitectureTest` (ArchUnit) | Controllers do not access repositories; `..api..` not used by service/domain/persistence; no cycles between feature packages |

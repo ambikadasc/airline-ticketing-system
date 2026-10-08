@@ -15,6 +15,9 @@ brief describes.
 CRUD, schedule edits or deletes, time-zone conversion, passenger validation, multi-leg
 itineraries, pricing and fare classes, a scheduled clean-up job for holds.
 
+How to build, run and try it: [README](../README.md). Detailed design: [LLD](../lld/design.md).
+Decision records with rejected alternatives: [`docs/adr`](../docs/adr/).
+
 ## 2. Architecture
 
 One deployable Spring Boot service (a layered monolith, packaged by feature) in front of one
@@ -30,7 +33,7 @@ Source: [`diagrams/architecture.mmd`](diagrams/architecture.mmd)
 | --- | --- | --- |
 | REST controllers | HTTP mapping, request-shape validation (Bean Validation), status codes | No business logic, never transactional, never touch repositories |
 | Application services | One public method per use case; the only transaction boundary | `@Transactional` here and nowhere else; `readOnly` for queries |
-| Domain model | JPA entities with behaviour (`reserve`, `release`, `cancel`, `confirm`, `expireHold`), the `SeatLayout` value object, domain exceptions | No public status setters; transitions reject invalid moves |
+| Domain model | JPA entities with behaviour (`reserve`, `release`, `cancel`, `confirm`, `expireHold`), the `SeatLayout` value object, the `BookingStatus` state machine | No public status setters; an invalid transition throws `IllegalStateException` (a bug, never a user error) |
 | Repositories | Persistence only: Spring Data JPA, plus one JDBC class for the bulk instance insert | No business rules |
 | PostgreSQL | Source of truth; constraints are the last line of defence | Schema owned by Flyway; Hibernate only validates |
 
@@ -313,6 +316,29 @@ Not built; each step is listed with the signal that would justify it.
 | Surname check alongside the reference for lookup and cancel; a mismatch returns 404 like an unknown reference | Self-service is exposed beyond trusted channels without user accounts; a strict match would split `passenger_name` into first and last name (additive migration) |
 | Value types for seat labels and booking references | Seats gain attributes (class, window/aisle) or seat strings travel through many APIs |
 | Authentication and role-based access on `/admin` | Any deployment beyond a demo |
+| Aircraft-rotation check (same aircraft on overlapping flights, with turnaround time) | Schedules are planned in this system rather than imported from a fleet-planning tool |
+
+### Multiple airlines
+
+The brief is single-airline, but no part of the design depends on it.
+
+- **Already works with no change.** The airline code is the first two characters of every flight
+  number (`XY101`, `EK001`), so schedules of several airlines coexist and their flight numbers
+  cannot clash under the existing unique constraint. Flights of different airlines on the same
+  route at the same time are normal and need no validation; search returns all of them. The flight
+  lock is per flight instance, so airlines never block each other. Instance generation, booking,
+  cancellation and the seat hold are unchanged.
+- **Aircraft ownership and airline data** → an `airline` reference table (like `airport`) and
+  `aircraft.airline_code` (one additive migration), plus a check in `ScheduleService` that a
+  schedule's flight-number prefix matches its aircraft's airline. Today any schedule may use any
+  aircraft, and the prefix is not validated. *Trigger: a second airline is onboarded.*
+- **Codeshares** → store the operating carrier explicitly; the flight-number prefix is only the
+  marketing carrier. *Trigger: flights sold under another airline's number.*
+- **Isolation between airlines** → an airline id on owned tables enforced on every query (e.g.
+  PostgreSQL row-level security) and airline-scoped admin authentication. *Trigger: the system is
+  offered as a platform to separate airlines.*
+- **Not covered for one airline or many:** aircraft-rotation clashes (table above) and airport
+  slot or capacity limits (handled by slot coordination outside a booking system).
 
 ## Changelog
 
@@ -321,6 +347,8 @@ Not built; each step is listed with the signal that would justify it.
 | 2026-10-07 | Initial design |
 | 2026-10-08 | Phase 2: `ApiException` is one concrete class carrying an `ErrorCode`; subclasses only for errors with extra fields (LLD §2) |
 | 2026-10-08 | Phase 3: search adds back seats on overdue holds with a second grouped query, not a correlated subquery (HLD §8, LLD §8) |
-| 2026-10-08 | Phase 6: incoming `X-Request-Id` accepted only if safe (≤ 64 chars, `[A-Za-z0-9._-]`), else a UUID (LLD §2) |
-| 2026-10-08 | Phase 4b: `hold_expires_at` is kept after a hold ends (ER diagram and schema snapshot wording); hold expiry rounded to whole seconds; expiry flushes before the SQL seat check (LLD §8) |
 | 2026-10-08 | Phase 4: the booking seat-conflict check reuses `SeatOccupancyQueries.takenSeats`, so seat map, search and booking share one definition of a taken seat (LLD §2, §7) |
+| 2026-10-08 | Phase 5: cancellation rules behind `CancellationPolicy`; lock order and idempotent cancel as designed (no change to this document) |
+| 2026-10-08 | Phase 4b: `hold_expires_at` is kept after a hold ends (ER diagram and schema snapshot wording); hold expiry rounded to whole seconds; expiry flushes before the SQL seat check (LLD §8) |
+| 2026-10-08 | Phase 6: incoming `X-Request-Id` accepted only if safe (≤ 64 chars, `[A-Za-z0-9._-]`), else a UUID (LLD §2) |
+| 2026-10-08 | Phase 8: documentation finished: links to README and ADRs; multiple-airlines and aircraft-rotation notes in §11; LLD aligned with the final code |
