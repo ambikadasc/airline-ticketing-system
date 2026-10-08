@@ -130,8 +130,9 @@ result both times.
   transaction. For each date in the window whose UTC day of week is one of the schedule's
   operating days, one row is created with `departure_at`/`arrival_at` as UTC instants and
   `available_seats = total_seats = rows × letters`.
-- **Rolling window.** `InstanceWindowJob` runs daily (cron, UTC) and once at startup. It
-  re-generates [today, today + 365] for every schedule and inserts with
+- **Rolling window.** The same top-up runs daily (cron, UTC), once at startup, and on demand
+  through `POST /api/v1/admin/instance-window/extend` (e.g. after lengthening the window). It
+  re-generates [today, today + window] for every schedule and inserts with
   `ON CONFLICT (schedule_id, flight_date) DO NOTHING`. The unique constraint makes the job
   idempotent: a re-run, a run after downtime, or a run on several nodes at once inserts only
   the missing rows.
@@ -316,6 +317,8 @@ Not built; each step is listed with the signal that would justify it.
 | Surname check alongside the reference for lookup and cancel; a mismatch returns 404 like an unknown reference | Self-service is exposed beyond trusted channels without user accounts; a strict match would split `passenger_name` into first and last name (additive migration) |
 | Value types for seat labels and booking references | Seats gain attributes (class, window/aisle) or seat strings travel through many APIs |
 | Authentication and role-based access on `/admin` | Any deployment beyond a demo |
+| Cluster-wide lock for the daily job (e.g. ShedLock), so one node runs it | Many nodes each repeating the (idempotent) daily run becomes costly |
+| Distributed tracing (OpenTelemetry via Micrometer Tracing; `traceId` in the log pattern, `traceparent` honoured) | A second service or asynchronous messaging. Today correlation is the `requestId` on every log line (job runs: `job-startup-…`/`job-daily-…`) and in every error response |
 | Aircraft-rotation check (same aircraft on overlapping flights, with turnaround time) | Schedules are planned in this system rather than imported from a fleet-planning tool |
 
 ### Multiple airlines
@@ -353,3 +356,4 @@ The brief is single-airline, but no part of the design depends on it.
 | 2026-10-08 | Phase 6: incoming `X-Request-Id` accepted only if safe (≤ 64 chars, `[A-Za-z0-9._-]`), else a UUID (LLD §2) |
 | 2026-10-08 | Configurable window: `airline.booking-window-days` is the single definition of the window (`AirlineProperties.lastBookableDate`), now also enforced at booking; `Retry-After` is configuration (`airline.retry-after`); Compose passes `AIRLINE_*` overrides through (LLD §2, §5, §6) |
 | 2026-10-08 | Phase 8: documentation finished: links to README and ADRs; multiple-airlines and aircraft-rotation notes in §11; LLD aligned with the final code |
+| 2026-10-08 | Phase 9: manual top-up endpoint `POST /admin/instance-window/extend` (§5); a booking-reference clash returns 503 `RETRY_LATER` instead of 500; `airline.retry-after` shared by both 503s; job runs log under their own id; tracing and scheduler-lock rows in §11 (LLD §2, §4, §6, §7, §9) |

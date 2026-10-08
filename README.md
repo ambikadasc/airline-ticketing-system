@@ -27,7 +27,7 @@ Docker Compose
 
 ### Build
 ```bash
-./mvnw verify          # compiles and runs all 300 tests against a real PostgreSQL (needs Docker)
+./mvnw verify          # compiles and runs all 310 tests against a real PostgreSQL (needs Docker)
 ```
 
 ### Run
@@ -115,6 +115,7 @@ Base path `/api/v1`, JSON, all times UTC. Full reference with examples:
 | GET | `/bookings/{reference}` | Fetch a booking | 200 |
 | POST | `/bookings/{reference}/cancel` | Cancel; repeating it returns the same result | 200 |
 | POST | `/bookings/{reference}/confirm` | Confirm a held booking (seat hold only) | 200 |
+| POST | `/admin/instance-window/extend` | Generate any missing flights up to the end of the booking window (idempotent; same as the daily job) | 200 `{"inserted": n, "windowEnd": date}` |
 
 ### Walkthrough with curl
 ```bash
@@ -155,7 +156,9 @@ stack traces, SQL, or class or constraint names.
   "requestId": "3f9c1e0a-7b2d-4c55-9a51-0d6e2b8f4a17", "unavailableSeats": ["12B"] }
 ```
 Status policy: 400 for invalid input, 404 for unknown ids, 409 for conflicts with the current
-state, 503 `LOCK_TIMEOUT` (with `Retry-After`) under extreme contention. Full catalogue:
+state, 503 with `Retry-After` for temporary conditions where nothing was changed: `LOCK_TIMEOUT`
+under extreme contention, `RETRY_LATER` when two bookings happen to draw the same reference at the
+same instant. Full catalogue:
 [LLD §6](lld/design.md#6-error-handling).
 
 ---
@@ -202,13 +205,14 @@ Before querying, the service checks:
 Flights that have already departed today are hidden. A non-operating date returns `200 []`.
 
 **How flight instances are generated.**
-1. When a schedule is created, all instances for [today, today + 365] are generated in the same
-   transaction, by a pure function (`FlightInstanceGenerator`) and one JDBC batch insert.
+1. When a schedule is created, all instances for [today, today + booking window] are generated in
+   the same transaction, by a pure function (`FlightInstanceGenerator`) and one JDBC batch insert.
 2. Times are UTC. An arrival at or before the departure time means the next day.
-3. A job keeps the rolling window filled: daily (cron) and once at startup, to heal downtime. It
-   re-generates the window for every schedule and inserts with
-   `ON CONFLICT (schedule_id, flight_date) DO NOTHING`, so re-runs, gaps and several nodes are
-   all safe.
+3. The rolling window is kept filled by the same top-up, triggered daily (cron), once at startup
+   (to heal downtime), and on demand through `POST /admin/instance-window/extend` (e.g. after
+   lengthening the window). It re-generates the window for every schedule and inserts with
+   `ON CONFLICT (schedule_id, flight_date) DO NOTHING`, so re-runs, gaps, overlapping triggers
+   and several nodes are all safe.
 
 **How seat availability is computed.** Each instance keeps an `available_seats` counter. It is
 decremented by a booking and incremented by a cancellation, always inside the transaction that
@@ -255,8 +259,10 @@ taken, none is booked, and the 409 lists the taken seats.
 
 **Booking creation.**
 - The reference is a 6-character PNR from an alphabet without look-alike characters (no
-  0/O/1/I), made with `SecureRandom`. It is checked for uniqueness, and the unique constraint is
-  the final guard.
+  0/O/1/I), made with `SecureRandom`. It is random rather than sequential because it alone opens
+  the booking (sequential codes could be guessed). It is checked for uniqueness, and the unique
+  constraint is the final guard: if two bookings draw the same code at the same instant, the second
+  gets 503 `RETRY_LATER` and nothing is booked ([ADR 0005](docs/adr/0005-no-authentication.md)).
 - The booking is `CONFIRMED` with `ACTIVE` seats (or `HELD` with the seat hold on).
 - The response carries everything the brief lists: reference, flight number, flight date,
   passenger count, seats with names, and status.
@@ -390,6 +396,8 @@ None of this is built. Each step is paired with the signal that would justify it
 | Surname check with the reference on lookup and cancel | Self-service is exposed publicly without accounts |
 | Authentication and role-based access on `/admin` | Any deployment beyond a demo |
 | Aircraft-rotation check (same aircraft on overlapping flights, with turnaround time) | Schedules are planned in this system rather than imported from a fleet-planning tool |
+| Cluster-wide lock for the daily job (e.g. ShedLock), so one node runs it | Many nodes each repeating the (idempotent) daily run becomes costly |
+| Distributed tracing (OpenTelemetry via Micrometer Tracing; `traceId` in the log pattern, `traceparent` honoured) | A second service or asynchronous messaging appears. Today a single service is correlated by `requestId`: on every log line (job runs use `job-startup-…`/`job-daily-…`) and in every error response |
 
 ### Multiple airlines
 The brief is single-airline, but the design does not depend on that.
@@ -417,15 +425,15 @@ coordination outside this system), and aircraft-rotation clashes (see the table 
 
 ## Testing approach
 
-300 tests, all run by `./mvnw verify`. Integration tests use PostgreSQL 16 in Testcontainers with
+310 tests, all run by `./mvnw verify`. Integration tests use PostgreSQL 16 in Testcontainers with
 the real Flyway migrations. No H2, and no test runs inside a test transaction.
 
 | Kind | What it proves | Classes |
 | --- | --- | --- |
 | Unit, test-first | Seat layout (labels, order, validity); instance generation (operating days only, both window ends, leap day, overnight); booking status transitions (full table); booking and hold behaviour; validators; reference format | `SeatLayoutTest`, `FlightInstanceGeneratorTest`, `FlightScheduleTest`, `BookingStatusTest`, `BookingTest`, `BookingHoldTest`, `FlightInstanceTest`, `BookingRequestValidatorTest`, `PnrGeneratorTest`, policy tests |
-| API (MockMvc + real DB) | Every endpoint's happy path; every response field; booking is all or nothing; cancel then rebook; idempotent cancel; window job idempotent and gap-filling | `ScheduleApiTest`, `FlightSearchApiTest`, `SeatMapApiTest`, `BookingApiTest`, `BookingCancellationApiTest`, `InstanceWindowJobTest` |
+| API (MockMvc + real DB) | Every endpoint's happy path; every response field; booking is all or nothing; cancel then rebook; idempotent cancel; window top-up idempotent and gap-filling (job and endpoint) | `ScheduleApiTest`, `FlightSearchApiTest`, `SeatMapApiTest`, `BookingApiTest`, `BookingCancellationApiTest`, `InstanceWindowJobTest`, `InstanceWindowApiTest` |
 | Concurrency | Exactly one winner for one seat (50 threads); no partial overlap; concurrent cancels release once; cancel-vs-book stays consistent; inventory invariant after every scenario; duplicate-number race gives no 500 | `BookingConcurrencyTest`, `CancellationConcurrencyTest`, `DuplicateFlightNumberRaceTest` |
-| Error contract | All 21 reachable error codes have the same shape and leak nothing; lock timeout → 503; request ids | `ErrorContractTest`, `LockTimeoutTest`, `RequestIdFilterTest`, `GlobalExceptionHandlerTest` |
+| Error contract | All 21 reachable error codes have the same shape and leak nothing; lock timeout → 503; a booking-reference clash → 503 `RETRY_LATER`, nothing stored; request ids; job-run ids | `ErrorContractTest`, `LockTimeoutTest`, `BookingReferenceClashTest`, `RequestIdFilterTest`, `GlobalExceptionHandlerTest`, `InstanceWindowJobLogIdTest` |
 | Seat hold on | Hold → confirm; expiry frees seats; confirm-vs-expiry race (the clock decides the single winner) | `SeatHoldTest` |
 | Edge cases and configuration | Last day of the window, overnight, created late in the day, last free seat, more seats than remain; a 30-day window applied by configuration to generation, search and booking | `EdgeCasesTest`, `BookingWindowConfigTest` |
 | Architecture | Controllers never reach repositories; nothing depends on the API layer; no package cycles | `ArchitectureTest` |

@@ -133,3 +133,7 @@ One line per decision, newest phase last. The reasoning for the major ones is in
 ## Job-run id in the logs (after Phase 8)
 - Each run of `InstanceWindowJob` puts its own id in the logging context (`job-startup-xxxxxxxx`, `job-daily-xxxxxxxx`) under the same key as the HTTP request id, so the existing log pattern shows it and the lines of one run can be grouped; it is removed in `finally`. The manual endpoint keeps its HTTP request id. This is request correlation, not tracing: no new dependency.
 - Distributed tracing is deliberately not built (one service, one database); it is documented as a scaling step with its trigger (a second service or asynchronous messaging).
+
+## Final documentation pass
+- README, HLD, LLD and ADR 0005 updated for the Phase 9 enhancements (configurable window, manual instance-window endpoint, retryable reference clash, job-run ids); README and HLD "Scaling and evolution" gain distributed tracing and a cluster-wide job lock, each with its trigger. ADR 0005 records why references are random rather than sequential and the keyed-permutation alternative.
+- Checks: configuration table matches `application.yml` and the Compose pass-through (6 settings); 46 links and anchors resolve; no private references in tracked files; no stale setting names or test counts; HLD PDF regenerated (17 pages, 5 diagrams).

@@ -19,8 +19,9 @@ com.airline.reservation
 ├── airport/          Airport, AirportRepository
 ├── aircraft/         Aircraft, SeatLayout, AircraftRepository
 ├── schedule/
-│   ├── api/          AdminScheduleController, CreateScheduleRequest
-│   ├── service/      ScheduleService, FlightInstanceGenerator, CreateScheduleCommand, ScheduleResult
+│   ├── api/          AdminScheduleController, AdminInstanceWindowController, CreateScheduleRequest
+│   ├── service/      ScheduleService, FlightInstanceGenerator, CreateScheduleCommand, ScheduleResult,
+│   │                 InstanceWindowResult
 │   ├── domain/       FlightSchedule
 │   ├── persistence/  FlightScheduleRepository
 │   └── job/          InstanceWindowJob
@@ -82,9 +83,10 @@ shape are the same today. Request records stay in `api` and map to `*Command` re
 | --- | --- |
 | `FlightSchedule` | Entity. Static factory `create(flightNumber, origin, destination, departureTime, arrivalTime, aircraftId, days, createdAt)` derives `arrivalDayOffset` (1 if arrival ≤ departure, else 0). `operatesOn(DayOfWeek)` answers the generator. `daysOfOperation` is a `Set<DayOfWeek>` `@ElementCollection` on `flight_schedule_day`. No setters (schedules are immutable) |
 | `FlightInstanceGenerator` | Pure logic, no Spring or DB. `static List<FlightInstance> generate(FlightSchedule, SeatLayout, LocalDate from, LocalDate to)`: one instance per date in `[from, to]` whose day of week is an operating day; `departure_at = date + departureTime (UTC)`, `arrival_at = date + offset + arrivalTime (UTC)` |
-| `ScheduleService` | `createSchedule(command)`, `getSchedule(id)`, `extendInstanceWindow()` (§7) |
-| `InstanceWindowJob` | `@Scheduled(cron = "${airline.instance-job-cron}", zone = "UTC")` and `ApplicationRunner`; both call `ScheduleService.extendInstanceWindow()` and log the inserted count |
+| `ScheduleService` | `createSchedule(command)`, `getSchedule(id)`, `extendInstanceWindow()` → `InstanceWindowResult(inserted, windowEnd)` (§7) |
+| `InstanceWindowJob` | `@Scheduled(cron = "${airline.instance-job-cron}", zone = "UTC")` and `ApplicationRunner`; both call `ScheduleService.extendInstanceWindow()`. Each run logs under its own id in the MDC (`job-startup-xxxxxxxx`, `job-daily-xxxxxxxx`), removed in `finally` |
 | `AdminScheduleController` | `POST /api/v1/admin/schedules`, `GET /api/v1/admin/schedules/{id}` |
+| `AdminInstanceWindowController` | `POST /api/v1/admin/instance-window/extend`: the same top-up as the job, on demand; returns `InstanceWindowResult` |
 
 ### flight
 | Class | Responsibility |
@@ -113,7 +115,7 @@ shape are the same today. Request records stay in `api` and map to `*Command` re
 | `BeforeDepartureCancellationPolicy` | The only implementation today (`@Component`): cancellable while `flight.isDepartedAt(now)` is false. A new rule (cut-off window, admin override) is a new implementation; locking, transaction and schema are untouched |
 | `BookingRequestValidator` | One public `validate(command)`; one private method per rule (§5). Returns the normalised seat list |
 | `PnrGenerator` | 6 characters from `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` (no 0/O/1/I) via `SecureRandom`. A plain class, no interface: there is no second implementation |
-| `BookingService` | `createBooking`, `getBooking`, `confirmBooking`, `cancelBooking` (§7) |
+| `BookingService` | `createBooking`, `getBooking`, `confirmBooking`, `cancelBooking` (§7). `newReference()` draws up to 5 codes against `existsByReference`; if all are taken it throws `RETRY_LATER` (503) |
 | `BookingController` | `POST /api/v1/bookings`, `GET /api/v1/bookings/{reference}`, `POST .../{reference}/confirm`, `POST .../{reference}/cancel` |
 
 ## 3. State machines
@@ -149,6 +151,7 @@ summary; Swagger UI at `/swagger-ui.html`.
 | GET | `/bookings/{reference}` | Fetch a booking | 200 |
 | POST | `/bookings/{reference}/confirm` | Confirm a held booking | 200 |
 | POST | `/bookings/{reference}/cancel` | Cancel a booking | 200 |
+| POST | `/admin/instance-window/extend` | Generate missing flight instances up to the end of the window | 200 |
 
 Cancel and confirm are `POST` sub-resources because they are state transitions; the booking stays
 retrievable afterwards.
@@ -252,7 +255,16 @@ and cancel:
 With the seat hold on, `status` is `HELD` and the body adds `"holdExpiresAt":
 "2026-11-01T08:10:00Z"`. The field is omitted for any other status.
 
-### 4.5 Confirm, cancel, fetch
+### 4.5 Top up the instance window
+```http
+POST /api/v1/admin/instance-window/extend
+```
+```json
+{ "inserted": 10, "windowEnd": "2027-01-05" }
+```
+The same idempotent work as the startup and daily job; safe to call repeatedly or while the job runs.
+
+### 4.6 Confirm, cancel, fetch
 - `POST /bookings/{reference}/confirm`: `HELD` → `CONFIRMED`; already `CONFIRMED` → 200
   unchanged.
 - `POST /bookings/{reference}/cancel`: `CONFIRMED`/`HELD` → `CANCELLED`; already `CANCELLED` or
@@ -320,7 +332,8 @@ duplicate flight number) are `409`.
 | 409 | `BOOKING_NOT_CANCELLABLE` | `CancellationPolicy` refuses (today: the flight has departed) |
 | 409 | `HOLD_EXPIRED` | Confirming a hold that has expired (status `EXPIRED`, or `HELD` past `hold_expires_at`) |
 | 409 | `BOOKING_NOT_CONFIRMABLE` | Confirming a `CANCELLED` booking |
-| 503 | `LOCK_TIMEOUT` | Flight lock not acquired within 3 s; header `Retry-After: 1` |
+| 503 | `LOCK_TIMEOUT` | Flight lock not acquired within 3 s; header `Retry-After` (`airline.retry-after`, default 1 s) |
+| 503 | `RETRY_LATER` | Two bookings drew the same reference at the same instant (unique constraint), or no free reference in 5 draws; nothing was booked; header `Retry-After` |
 | 500 | `INTERNAL_ERROR` | Anything unexpected; logged at ERROR with the stack trace, generic message to the client |
 
 `GlobalExceptionHandler` mapping:
@@ -332,7 +345,8 @@ duplicate flight number) are `409`.
   validation failures.
 - `ApiException` → its `ErrorCode` status and code, plus its extra properties.
 - `DataIntegrityViolationException` by constraint name: `uq_active_seat` → 409
-  `SEAT_UNAVAILABLE`; `uq_schedule_flight_number` → 409 `DUPLICATE_FLIGHT_NUMBER`; anything else
+  `SEAT_UNAVAILABLE`; `uq_schedule_flight_number` → 409 `DUPLICATE_FLIGHT_NUMBER`;
+  `uq_booking_reference` → 503 `RETRY_LATER` with `Retry-After`; anything else
   → 500.
 - `PessimisticLockingFailureException` (includes lock timeouts) → 503 `LOCK_TIMEOUT` with
   `Retry-After` from `airline.retry-after` (default 1 s).
@@ -348,9 +362,9 @@ COMMITTED. `spring.jpa.open-in-view=false`, so all loading happens inside the se
 
 | Method | Tx | Steps |
 | --- | --- | --- |
-| `ScheduleService.createSchedule` | read-write | Check airports, aircraft, flight number → `saveAndFlush` schedule (the JDBC insert needs its id) → generate `[today, today+365]` → bulk insert → return with count |
+| `ScheduleService.createSchedule` | read-write | Check airports, aircraft, flight number → `saveAndFlush` schedule (the JDBC insert needs its id) → generate `[today, lastBookableDate(today)]` → bulk insert → return with count |
 | `ScheduleService.getSchedule` | read-only | Load by id |
-| `ScheduleService.extendInstanceWindow` | read-write | For each schedule: generate `[today, today+365]`, bulk insert with `ON CONFLICT DO NOTHING`; return total inserted. Idempotent, safe on several nodes |
+| `ScheduleService.extendInstanceWindow` | read-write | For each schedule: generate `[today, lastBookableDate(today)]`, bulk insert with `ON CONFLICT DO NOTHING`; return `(inserted, windowEnd)`. Triggered at startup, daily, and by `POST /admin/instance-window/extend`. Idempotent, safe on several nodes and overlapping triggers |
 | `FlightSearchService.search` | read-only | §4.2, §8 |
 | `SeatMapService.getSeatMap` | read-only | Load instance + aircraft → taken seats → walk the layout |
 | `BookingService.createBooking` | read-write | Validate request → **lock instance** → expire overdue holds → departed? → inside the booking window? → seats in layout? → taken seats (`SeatOccupancyQueries.takenSeats` ∩ requested)? → PNR → `policy.newBooking` → `saveAndFlush` → `instance.reserve(n)` |
@@ -386,6 +400,12 @@ holds as free, and the next successful write on that flight reaps them.
 **Nothing slow inside a transaction:** no remote calls; PNR generation is in-memory with at
 most 5 `existsByReference` checks.
 
+**Booking references are random, not sequential**, because the reference alone opens and cancels a
+booking. Uniqueness is guaranteed by `uq_booking_reference`; the check only avoids committed
+clashes. Two bookings on different flights (no shared lock) drawing the same code at the same
+instant: the second insert violates the constraint, the transaction rolls back, and the client gets
+503 `RETRY_LATER` (§6).
+
 ## 8. Seat-hold read rules
 
 The flag is read only in `BookingPolicyConfig`. Every rule below runs with the flag on or off;
@@ -416,21 +436,24 @@ confirmed, cancelled, holds expired (count). Passenger names are never logged at
 Error logging is by status class, in `GlobalExceptionHandler`:
 - **4xx**: WARN, one line with `code`, method, path and the detail; no stack trace. These are
   client or business outcomes (a seat conflict is an expected result under load), not faults.
-- **5xx**: ERROR with the full stack trace. `503 LOCK_TIMEOUT` is logged at WARN without a stack
-  trace, because it is a contention signal rather than a bug.
+- **5xx**: ERROR with the full stack trace. The 503s (`LOCK_TIMEOUT`, `RETRY_LATER`) are logged at
+  WARN without a stack trace: they are temporary conditions, not bugs.
+
+Background job runs have no HTTP request, so `InstanceWindowJob` puts its own run id in the MDC
+(`job-startup-…`, `job-daily-…`); every log line therefore carries an id.
 
 ## 10. Testing approach
 
-300 tests, all run by `./mvnw verify`. Integration tests extend one `IntegrationTest` base: one
+310 tests, all run by `./mvnw verify`. Integration tests extend one `IntegrationTest` base: one
 Spring context and one PostgreSQL 16 container (Testcontainers, real Flyway migrations), tables
 truncated before each test, a `MutableClock` reset to 2026-01-05T00:00Z, and no `@Transactional`
 on tests (they must see committed data).
 
 | Level | Classes | What |
 | --- | --- | --- |
-| Unit (test-first) | `SeatLayoutTest`, `FlightInstanceGeneratorTest`, `FlightScheduleTest`, `FlightInstanceTest`, `BookingTest`, `BookingHoldTest`, `BookingStatusTest`, `BookingRequestValidatorTest`, `PnrGeneratorTest`, `BookingPolicyTest`, `BeforeDepartureCancellationPolicyTest`, `GlobalExceptionHandlerTest` | Pure logic without Spring: seat labels and validity; weekdays, inclusive window ends, leap day, overnight; the full status-transition table; hold expiry; validation rules; constraint-name mapping |
-| API (MockMvc) | `ScheduleApiTest`, `FlightSearchApiTest`, `SeatMapApiTest`, `BookingApiTest`, `BookingCancellationApiTest`, `InstanceWindowJobTest`, `ReferenceDataTest`, `EdgeCasesTest`, `BookingWindowConfigTest` (own context, 30-day window) | Every endpoint and response field; all-or-nothing booking; cancel then rebook; window job idempotent and gap-filling; window ends, overnight, late-day creation, last free seat |
-| Error contract | `ErrorContractTest`, `LockTimeoutTest`, `RequestIdFilterTest` | All 21 reachable error codes share one shape and leak nothing; lock timeout → 503 with `Retry-After`; request ids |
+| Unit (test-first) | `SeatLayoutTest`, `FlightInstanceGeneratorTest`, `FlightScheduleTest`, `FlightInstanceTest`, `BookingTest`, `BookingHoldTest`, `BookingStatusTest`, `BookingRequestValidatorTest`, `PnrGeneratorTest`, `BookingPolicyTest`, `BeforeDepartureCancellationPolicyTest`, `GlobalExceptionHandlerTest`, `InstanceWindowJobLogIdTest` | Pure logic without Spring: seat labels and validity; weekdays, inclusive window ends, leap day, overnight; the full status-transition table; hold expiry; validation rules; constraint-name mapping |
+| API (MockMvc) | `ScheduleApiTest`, `FlightSearchApiTest`, `SeatMapApiTest`, `BookingApiTest`, `BookingCancellationApiTest`, `InstanceWindowJobTest`, `InstanceWindowApiTest`, `ReferenceDataTest`, `EdgeCasesTest`, `BookingWindowConfigTest` (own context, 30-day window) | Every endpoint and response field; all-or-nothing booking; cancel then rebook; window job idempotent and gap-filling; window ends, overnight, late-day creation, last free seat |
+| Error contract | `ErrorContractTest`, `LockTimeoutTest`, `BookingReferenceClashTest` (own context; fixed generator + missed check, as in the race), `RequestIdFilterTest` | All 21 reachable error codes share one shape and leak nothing; lock timeout → 503 with `Retry-After`; reference clash → 503 `RETRY_LATER`, nothing stored; request ids |
 | Concurrency | `BookingConcurrencyTest`, `CancellationConcurrencyTest`, `DuplicateFlightNumberRaceTest` (helpers in `ConcurrencySupport`) | 50 threads on one seat → exactly 1 success; 50 seats; overlapping 1A+1B vs 1B+1C; 10 concurrent cancels; cancel vs book; duplicate flight number never 500. After each: counter invariant and no seat taken twice. Shown to fail with the lock and index removed (10 of 50 succeeded) |
 | Seat hold on | `SeatHoldTest` (own context, `airline.seat-hold.enabled=true`) | Hold → confirm; expiry frees seats for the next customer; confirm after expiry → 409; confirm-vs-expiry race decided by the clock |
 | Architecture | `ArchitectureTest` (ArchUnit) | Controllers do not access repositories; `..api..` not used by service/domain/persistence; no cycles between feature packages |
