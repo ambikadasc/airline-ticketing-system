@@ -91,3 +91,9 @@ One line per decision, newest phase last. The reasoning for the major ones is in
 - Logging: 4xx and 503 at WARN on one line (method, path, code, detail); other 5xx at ERROR with stack trace. Every line carries `[requestId]` via `logging.pattern.level`; lines outside a request show `[]`.
 - Incoming `X-Request-Id` is accepted only if it matches `^[A-Za-z0-9._-]{1,64}$`; otherwise a UUID is generated (prevents log injection).
 - ArchUnit 1.4.1 (test scope), three rules: controllers do not access repositories (anything in `..persistence..` or any Spring Data `Repository`); `..api..` is not used by service, domain or persistence; no cycles between feature packages.
+
+## Phase 7 – Hardening
+- Edge cases covered through the API (`EdgeCasesTest`): the last day of the window (today + 365) is searchable and bookable, today + 366 is rejected; an overnight flight shows next-day arrival and is bookable; a schedule created late in the day generates today's (already departed) instance, which search hides and booking rejects; the last free seat can be booked, after which the flight shows 0 available and a further booking is a 409; a request including taken seats books nothing.
+- A full flight stays in search results with `availableSeats: 0` (hiding it would be filtering beyond the brief).
+- The smoke test (base plan section 12) is committed as `scripts/smoke-test.sh`: bash and curl only, the date computed (next Monday at least a day ahead), PASS/FAIL per step, non-zero exit at the first failure; it needs a fresh database. Run with `bash scripts/smoke-test.sh` (git does not record the executable bit here, `core.filemode=false`).
+- `./mvnw clean verify` passed three times in a row (298 tests, about 40 s each); the smoke test passed all 10 checks on a fresh Compose stack, and failed cleanly (exit 1 at step 1) when re-run on a used database.
