@@ -23,8 +23,8 @@ class InstanceWindowJobTest extends IntegrationTest {
 	void runningTheJobAgainInsertsNothing() {
 		scheduleService.createSchedule(dailyXy101());
 
-		assertThat(scheduleService.extendInstanceWindow()).isZero();
-		assertThat(scheduleService.extendInstanceWindow()).isZero();
+		assertThat(scheduleService.extendInstanceWindow().inserted()).isZero();
+		assertThat(scheduleService.extendInstanceWindow().inserted()).isZero();
 		assertThat(instanceCount()).isEqualTo(366);
 	}
 
@@ -37,7 +37,7 @@ class InstanceWindowJobTest extends IntegrationTest {
 				""");
 		assertThat(instanceCount()).isEqualTo(356);
 
-		assertThat(scheduleService.extendInstanceWindow()).isEqualTo(10);
+		assertThat(scheduleService.extendInstanceWindow().inserted()).isEqualTo(10);
 		assertThat(instanceCount()).isEqualTo(366);
 	}
 

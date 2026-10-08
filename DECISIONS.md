@@ -104,3 +104,32 @@ One line per decision, newest phase last. The reasoning for the major ones is in
 - `db/schema.sql` stays the commented snapshot rather than raw `pg_dump` output (which drops the comments); it was re-verified identical to a migrated database (`pg_dump --schema-only`, 45 CREATE/ALTER statements).
 - `hld/architecture.pdf` generated with md-to-pdf, pointed at the headless Chrome already installed for the diagrams (16 pages, the 5 diagrams embedded).
 - Every relative link and anchor in README, HLD, LLD and ADRs resolves (44 checked); every README command was executed as written (Compose run, developer run, seat-hold run, smoke test, build).
+- Fresh-clone check (commit 8f30441, cloned into an empty folder): no private files present; `docker compose up --build` → health UP, Swagger 200; `bash scripts/smoke-test.sh` → all checks pass; `./mvnw verify` → 298 tests green.
+- The fresh-clone check found that git stored `mvnw` (and the smoke script) without the executable bit (`core.filemode=false` on Windows). On Linux/macOS that breaks `./mvnw` and the Docker image build (reproduced: exit 126). Fixed in the Dockerfile with `chmod +x mvnw` before first use (verified with a mode-644 build context), and the executable bit is recorded in git with `git update-index --chmod=+x`.
+
+## Configurable booking window (after Phase 8)
+- The booking window was already the property `airline.booking-window-days`; it is now the single definition of the window (`AirlineProperties.lastBookableDate(today)`), used by instance generation, search **and booking**. Booking a flight dated beyond the window gives 400 `OUTSIDE_BOOKING_WINDOW`, so shortening the window takes effect at once even for instances generated earlier; lengthening it takes effect at the next startup or daily job.
+- No "365" remains in code text (Swagger summaries, Javadoc); they name the property instead.
+- `Retry-After` for 503 responses is configuration: `airline.retry-after` (default `PT1S`; first added as `airline.lock-retry-after`, renamed in 9.3 when a second 503 used it).
+- `docker-compose.yml` passes the `AIRLINE_*` variables through when set in the shell or a `.env` file (unset ones keep the `application.yml` default). Verified: `AIRLINE_BOOKING_WINDOW_DAYS=30 docker compose up` generates 31 instances per daily schedule and refuses day 31; the default run generates 366.
+- Environment variable names: the `AIRLINE_*` underscore form works (verified in Docker); for the Hikari lock timeout only the documented form `SPRING_DATASOURCE_HIKARI_CONNECTIONINITSQL` binds (the underscore form fails at startup) — verified via Hikari's config log.
+- Kept in code on purpose: seat, flight-number and reference formats, row limits (they mirror column sizes and constraints, so changing them needs a migration), the request-id safety pattern, and internal limits (JDBC batch size, reference retry count).
+
+## Manual trigger for instance generation (after Phase 8)
+- `POST /api/v1/admin/instance-window/extend` → 200 `{"inserted": n, "windowEnd": date}` runs the same top-up as the daily job, on demand (e.g. after lengthening the window or after downtime past midnight). It is a separate `AdminInstanceWindowController` in `schedule.api` because it concerns the whole window, not one schedule.
+- `ScheduleService.extendInstanceWindow()` now returns `InstanceWindowResult(inserted, windowEnd)`; the job ignores the value and the log line now includes `windowEnd`.
+- 200, not 201/202: nothing addressable is created and the work completes synchronously.
+- Safe to call repeatedly or while the daily job runs: each date is inserted once (unique `(schedule_id, flight_date)` + `ON CONFLICT DO NOTHING`); no new locking. Unauthenticated like every admin endpoint (ADR 0005).
+- Generation therefore has four triggers: schedule creation (same transaction), startup, the daily cron, and this endpoint.
+
+## Booking-reference clash → retryable 503 (after Phase 8)
+- References stay random (`SecureRandom`) rather than sequential: the reference alone opens and cancels a booking, so sequential codes would be enumerable. Uniqueness is guaranteed by the `uq_booking_reference` constraint; `existsByReference` (up to 5 draws) only avoids clashes with committed bookings.
+- Two bookings on different flights (no shared lock) drawing the same code at the same moment: the second insert violates `uq_booking_reference`, the transaction rolls back (nothing booked), and the handler now answers 503 `RETRY_LATER` with `Retry-After` instead of 500. All 5 draws taken (only plausible with hundreds of millions of bookings) gives the same 503.
+- `RETRY_LATER` is a generic "temporary, nothing changed, retry" code; logged at WARN with the constraint name, which is never returned.
+- `airline.lock-retry-after` renamed `airline.retry-after` (not yet committed when renamed): one Retry-After setting for both 503s (`LOCK_TIMEOUT`, `RETRY_LATER`).
+- Tested deterministically through HTTP (`BookingReferenceClashTest`): a fixed generator plus a check made to miss, as in the race, so the real constraint rejects the second booking → 503, nothing stored; and the exhausted-draws path → 503. Handler unit test for the mapping.
+- Not built: a keyed permutation of a sequence (unique by construction and unpredictable); recorded as the alternative.
+
+## Job-run id in the logs (after Phase 8)
+- Each run of `InstanceWindowJob` puts its own id in the logging context (`job-startup-xxxxxxxx`, `job-daily-xxxxxxxx`) under the same key as the HTTP request id, so the existing log pattern shows it and the lines of one run can be grouped; it is removed in `finally`. The manual endpoint keeps its HTTP request id. This is request correlation, not tracing: no new dependency.
+- Distributed tracing is deliberately not built (one service, one database); it is documented as a scaling step with its trigger (a second service or asynchronous messaging).

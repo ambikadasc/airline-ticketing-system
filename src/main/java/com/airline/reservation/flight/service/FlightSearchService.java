@@ -61,7 +61,7 @@ public class FlightSearchService {
 
 	private void requireInsideBookingWindow(LocalDate date) {
 		LocalDate today = LocalDate.now(clock);
-		LocalDate lastBookableDate = today.plusDays(properties.bookingWindowDays());
+		LocalDate lastBookableDate = properties.lastBookableDate(today);
 		if (date.isBefore(today) || date.isAfter(lastBookableDate)) {
 			throw new ApiException(ErrorCode.OUTSIDE_BOOKING_WINDOW,
 					"date must be between " + today + " and " + lastBookableDate);

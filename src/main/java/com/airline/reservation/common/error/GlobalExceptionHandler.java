@@ -26,6 +26,7 @@ import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExcep
 
 import tools.jackson.core.JacksonException;
 
+import com.airline.reservation.common.config.AirlineProperties;
 import com.airline.reservation.common.logging.RequestIdFilter;
 
 /**
@@ -42,12 +43,24 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 
 	private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
+	static final String RETRY_LATER_DETAIL =
+			"The booking could not be completed right now; nothing was booked. Please retry";
+
+	private final AirlineProperties properties;
+
+	public GlobalExceptionHandler(AirlineProperties properties) {
+		this.properties = properties;
+	}
+
 	/** Expected use-case failures: unknown ids, conflicts, broken rules. */
 	@ExceptionHandler(ApiException.class)
 	ResponseEntity<ProblemDetail> handleApiException(ApiException ex, HttpServletRequest request) {
+		logWarning(request, ex.getCode(), ex.getMessage());
+		if (ex.getCode() == ErrorCode.RETRY_LATER) {
+			return retryLater(ex.getCode(), ex.getMessage());
+		}
 		ProblemDetail problem = problem(ex.getCode(), ex.getMessage());
 		ex.extraProperties().forEach(problem::setProperty);
-		logWarning(request, ex.getCode(), ex.getMessage());
 		return ResponseEntity.status(ex.getCode().status()).body(problem);
 	}
 
@@ -68,6 +81,14 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 			code = ErrorCode.DUPLICATE_FLIGHT_NUMBER;
 			detail = "A schedule with this flight number already exists";
 		}
+		else if ("uq_booking_reference".equals(constraint)) {
+			// Two bookings drew the same random reference at the same moment (no shared lock between
+			// different flights). The transaction rolled back, so nothing was booked: tell the client
+			// to retry, which draws a new reference.
+			log.warn("{} {} -> {} (constraint {})", request.getMethod(), request.getRequestURI(),
+					ErrorCode.RETRY_LATER, constraint);
+			return retryLater(ErrorCode.RETRY_LATER, RETRY_LATER_DETAIL);
+		}
 		else {
 			return handleUnexpected(ex, request);
 		}
@@ -75,15 +96,19 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 		return ResponseEntity.status(code.status()).body(problem(code, detail));
 	}
 
-	/** The flight lock was not granted within lock_timeout (3 s): the flight is busy, try again. */
+	/** The flight lock was not granted within lock_timeout: the flight is busy, try again shortly. */
 	@ExceptionHandler(PessimisticLockingFailureException.class)
 	ResponseEntity<ProblemDetail> handleLockTimeout(PessimisticLockingFailureException ex,
 			HttpServletRequest request) {
-		ErrorCode code = ErrorCode.LOCK_TIMEOUT;
 		String detail = "The flight is busy with other requests; please retry";
-		logWarning(request, code, detail);
+		logWarning(request, ErrorCode.LOCK_TIMEOUT, detail);
+		return retryLater(ErrorCode.LOCK_TIMEOUT, detail);
+	}
+
+	/** A 503 with Retry-After (airline.retry-after): a temporary condition, nothing was changed. */
+	private ResponseEntity<ProblemDetail> retryLater(ErrorCode code, String detail) {
 		return ResponseEntity.status(code.status())
-				.header(HttpHeaders.RETRY_AFTER, "1")
+				.header(HttpHeaders.RETRY_AFTER, String.valueOf(properties.retryAfter().toSeconds()))
 				.body(problem(code, detail));
 	}
 

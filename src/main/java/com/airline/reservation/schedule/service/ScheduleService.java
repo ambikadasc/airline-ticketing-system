@@ -86,12 +86,13 @@ public class ScheduleService {
 	/**
 	 * Tops up every schedule's instances so the window always reaches today + booking window.
 	 * Idempotent: dates that already have an instance are skipped, so it is safe to run daily,
-	 * at startup, after downtime, or on several nodes at once.
+	 * at startup, after downtime, or on several nodes at once. Triggered by the daily job, at startup,
+	 * and on demand through the admin API.
 	 *
-	 * @return the number of instances inserted
+	 * @return how many instances were inserted, and the last date the window now reaches
 	 */
 	@Transactional
-	public int extendInstanceWindow() {
+	public InstanceWindowResult extendInstanceWindow() {
 		Map<Long, SeatLayout> layouts = new HashMap<>();
 		int inserted = 0;
 		for (FlightSchedule schedule : scheduleRepository.findAllWithDays()) {
@@ -99,14 +100,15 @@ public class ScheduleService {
 					id -> aircraftRepository.findById(id).orElseThrow().seatLayout());
 			inserted += generateWindow(schedule, layout);
 		}
-		log.info("Instance window extended: inserted={}", inserted);
-		return inserted;
+		LocalDate windowEnd = properties.lastBookableDate(LocalDate.now(clock));
+		log.info("Instance window extended: inserted={} windowEnd={}", inserted, windowEnd);
+		return new InstanceWindowResult(inserted, windowEnd);
 	}
 
 	private int generateWindow(FlightSchedule schedule, SeatLayout layout) {
 		LocalDate today = LocalDate.now(clock);
 		List<FlightInstance> instances = FlightInstanceGenerator.generate(schedule, layout, today,
-				today.plusDays(properties.bookingWindowDays()));
+				properties.lastBookableDate(today));
 		return instanceWriter.insertMissing(instances);
 	}
 

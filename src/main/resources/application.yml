@@ -31,6 +31,8 @@ airline:
   booking-window-days: 365
   max-seats-per-booking: 9
   instance-job-cron: "0 5 0 * * *"
+  # Retry-After sent with a 503 (LOCK_TIMEOUT, RETRY_LATER); pairs with lock_timeout above.
+  retry-after: PT1S
   seat-hold:
     enabled: false
     ttl: PT10M

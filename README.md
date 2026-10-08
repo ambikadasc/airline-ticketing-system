@@ -1,7 +1,7 @@
 # Airline Reservation System
 
 Backend for a single airline. A back office defines flight schedules; customers search flights,
-view seat maps, book seats and cancel bookings, up to 365 days ahead. Double booking is impossible,
+view seat maps, book seats and cancel bookings, up to 365 days ahead (configurable). Double booking is impossible,
 including under concurrent requests.
 
 **Stack:** Java 21 · Spring Boot 4.1 · PostgreSQL 16 · Flyway · JUnit 5 + Testcontainers ·
@@ -27,7 +27,7 @@ Docker Compose
 
 ### Build
 ```bash
-./mvnw verify          # compiles and runs all 298 tests against a real PostgreSQL (needs Docker)
+./mvnw verify          # compiles and runs all 300 tests against a real PostgreSQL (needs Docker)
 ```
 
 ### Run
@@ -50,6 +50,34 @@ docker compose run --rm --service-ports -e AIRLINE_SEAT_HOLD_ENABLED=true app
 ```
 Bookings are then `HELD` for 10 minutes and must be confirmed with
 `POST /api/v1/bookings/{reference}/confirm`.
+
+### Configuration
+Every business setting lives in [`application.yml`](src/main/resources/application.yml) under
+`airline.*`. Each can be changed without touching code, through an environment variable (Spring
+Boot maps `AIRLINE_BOOKING_WINDOW_DAYS` to `airline.booking-window-days`):
+
+| Setting | Environment variable | Default | Effect |
+| --- | --- | --- | --- |
+| `airline.booking-window-days` | `AIRLINE_BOOKING_WINDOW_DAYS` | `365` | How far ahead flights are generated, searchable and bookable (today + N days, both ends included) |
+| `airline.max-seats-per-booking` | `AIRLINE_MAX_SEATS_PER_BOOKING` | `9` | Most passengers in one booking |
+| `airline.instance-job-cron` | `AIRLINE_INSTANCE_JOB_CRON` | `0 5 0 * * *` | When the daily job tops up the window (UTC) |
+| `airline.retry-after` | `AIRLINE_RETRY_AFTER` | `PT1S` | `Retry-After` sent with a 503 (`LOCK_TIMEOUT`, `RETRY_LATER`) |
+| `airline.seat-hold.enabled` | `AIRLINE_SEAT_HOLD_ENABLED` | `false` | Optional seat hold |
+| `airline.seat-hold.ttl` | `AIRLINE_SEAT_HOLD_TTL` | `PT10M` | How long a hold lasts |
+| `spring.datasource.hikari.connection-init-sql` | `SPRING_DATASOURCE_HIKARI_CONNECTIONINITSQL` | `SET lock_timeout = '3s'` | How long a booking waits for a flight lock |
+
+With Docker Compose, set any of the `AIRLINE_*` variables in your shell or in a `.env` file next to
+`docker-compose.yml`; Compose passes them through, and unset ones keep the default:
+```bash
+AIRLINE_BOOKING_WINDOW_DAYS=180 docker compose up --build
+```
+A longer window takes effect at the next startup or daily job, which generates the extra dates. A
+shorter one is enforced at once by search and booking; flights already generated beyond it are
+simply no longer offered.
+
+Format rules (seat and flight-number formats, the reference format, row limits) stay in code on
+purpose: they mirror database column sizes and constraints, so changing them needs a migration,
+not a setting.
 
 ### Database initialization
 Automatic. On startup Flyway applies [`db/migrations`](db/migrations/):
@@ -205,7 +233,7 @@ seats (`ACTIVE`, or `HELD` with a live hold).
    - format `^[1-9]\d?[A-Z]$`
    - no seat twice in one request
 3. **Rules that need the flight**, checked under the lock:
-   - the flight exists and has not departed
+   - the flight exists, has not departed, and is inside the booking window
    - every seat exists on that aircraft (`SeatLayout`, the single definition of a valid seat)
    - no requested seat is taken
 
@@ -219,7 +247,7 @@ database-level backstop: even buggy code could not store a seat twice. See
 **Transaction flow** (one transaction, `BookingService.createBooking`):
 ```
 validate request  →  LOCK flight row  →  [seat hold: release expired holds]
-→  departed? (409)  →  seats on aircraft? (400 INVALID_SEAT)  →  any seat taken? (409 SEAT_UNAVAILABLE)
+→  departed? (409)  →  beyond the booking window? (400)  →  seats on aircraft? (400 INVALID_SEAT)  →  any seat taken? (409 SEAT_UNAVAILABLE)
 →  generate reference  →  insert booking + one booking_seat per passenger  →  counter −= n  →  COMMIT
 ```
 Any failure rolls back everything, so a booking is **all or nothing**: if one requested seat is
@@ -389,7 +417,7 @@ coordination outside this system), and aircraft-rotation clashes (see the table 
 
 ## Testing approach
 
-298 tests, all run by `./mvnw verify`. Integration tests use PostgreSQL 16 in Testcontainers with
+300 tests, all run by `./mvnw verify`. Integration tests use PostgreSQL 16 in Testcontainers with
 the real Flyway migrations. No H2, and no test runs inside a test transaction.
 
 | Kind | What it proves | Classes |
@@ -399,7 +427,7 @@ the real Flyway migrations. No H2, and no test runs inside a test transaction.
 | Concurrency | Exactly one winner for one seat (50 threads); no partial overlap; concurrent cancels release once; cancel-vs-book stays consistent; inventory invariant after every scenario; duplicate-number race gives no 500 | `BookingConcurrencyTest`, `CancellationConcurrencyTest`, `DuplicateFlightNumberRaceTest` |
 | Error contract | All 21 reachable error codes have the same shape and leak nothing; lock timeout → 503; request ids | `ErrorContractTest`, `LockTimeoutTest`, `RequestIdFilterTest`, `GlobalExceptionHandlerTest` |
 | Seat hold on | Hold → confirm; expiry frees seats; confirm-vs-expiry race (the clock decides the single winner) | `SeatHoldTest` |
-| Edge cases | Last day of the window, overnight, created late in the day, last free seat, more seats than remain | `EdgeCasesTest` |
+| Edge cases and configuration | Last day of the window, overnight, created late in the day, last free seat, more seats than remain; a 30-day window applied by configuration to generation, search and booking | `EdgeCasesTest`, `BookingWindowConfigTest` |
 | Architecture | Controllers never reach repositories; nothing depends on the API layer; no package cycles | `ArchitectureTest` |
 
 The single-seat race test was first run **without** the lock and the unique index (10 of 50

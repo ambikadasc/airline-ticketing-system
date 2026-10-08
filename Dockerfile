@@ -5,7 +5,8 @@ WORKDIR /workspace
 # Resolve dependencies first so this layer is cached while only sources change.
 COPY mvnw pom.xml ./
 COPY .mvn .mvn
-RUN ./mvnw -q -B dependency:go-offline
+# chmod: a checkout on Windows may not carry the executable bit into the build context.
+RUN chmod +x mvnw && ./mvnw -q -B dependency:go-offline
 
 COPY src src
 # Flyway migrations are packaged from db/migrations (see the <resources> section of pom.xml).

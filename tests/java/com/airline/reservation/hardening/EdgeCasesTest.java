@@ -50,6 +50,17 @@ class EdgeCasesTest extends IntegrationTest {
 		search("2027-01-06") // today + 366
 				.andExpect(status().isBadRequest())
 				.andExpect(jsonPath("$.code").value("OUTSIDE_BOOKING_WINDOW"));
+
+		// Even if an instance exists beyond the window (e.g. the window was shortened), it is not bookable.
+		jdbcTemplate.update("""
+				INSERT INTO flight_instance (schedule_id, flight_number, origin_code, destination_code, aircraft_id,
+				  flight_date, departure_at, arrival_at, total_seats, available_seats)
+				VALUES (1, 'XY101', 'DXB', 'LHR', 1, DATE '2027-01-06',
+				  TIMESTAMPTZ '2027-01-06 09:30:00+00', TIMESTAMPTZ '2027-01-06 13:45:00+00', 180, 180)
+				""");
+		book(flightId("XY101", "2027-01-06"), "12A")
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.code").value("OUTSIDE_BOOKING_WINDOW"));
 	}
 
 	@Test

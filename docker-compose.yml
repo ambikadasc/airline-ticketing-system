@@ -17,6 +17,14 @@ services:
     build: .
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/airline
+      # Optional overrides of the airline.* settings in application.yml. Each is passed through only
+      # when set in your shell or in a .env file, e.g. AIRLINE_BOOKING_WINDOW_DAYS=180 docker compose up
+      AIRLINE_BOOKING_WINDOW_DAYS:
+      AIRLINE_MAX_SEATS_PER_BOOKING:
+      AIRLINE_INSTANCE_JOB_CRON:
+      AIRLINE_RETRY_AFTER:
+      AIRLINE_SEAT_HOLD_ENABLED:
+      AIRLINE_SEAT_HOLD_TTL:
     ports:
       - "8080:8080"
     depends_on:

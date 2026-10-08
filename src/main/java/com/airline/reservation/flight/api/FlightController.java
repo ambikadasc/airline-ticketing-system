@@ -33,7 +33,7 @@ public class FlightController {
 		this.seatMapService = seatMapService;
 	}
 
-	@Operation(summary = "Search flights by route and travel date (today up to 365 days ahead)")
+	@Operation(summary = "Search flights by route and travel date (from today to the end of the booking window, airline.booking-window-days)")
 	@GetMapping
 	public List<FlightSearchResult> search(
 			@Parameter(example = "DXB") @RequestParam @Pattern(regexp = "^[A-Z]{3}$", message = "must be a 3-letter IATA code") String origin,

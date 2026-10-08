@@ -63,7 +63,7 @@ shape are the same today. Request records stay in `api` and map to `*Command` re
 | Class | Responsibility |
 | --- | --- |
 | `ClockConfig` | `@Bean Clock clock()` → `Clock.systemUTC()`. Tests replace it with a `@Primary` `MutableClock` that stands still at 2026-01-05T00:00Z until a test moves it |
-| `AirlineProperties` | `@ConfigurationProperties("airline")` record: `bookingWindowDays` (365), `maxSeatsPerBooking` (9), `instanceJobCron`, `seatHold { enabled=false, ttl=PT10M }` |
+| `AirlineProperties` | `@ConfigurationProperties("airline")` record: `bookingWindowDays` (365), `maxSeatsPerBooking` (9), `instanceJobCron`, `retryAfter` (PT1S), `seatHold { enabled=false, ttl=PT10M }`. `lastBookableDate(today)` is the single definition of the window, used by generation, search and booking. Every value is overridable by environment variable (README "Configuration") |
 | `ApiException` | Concrete `RuntimeException(ErrorCode, detail)`. The `ErrorCode` already carries the HTTP status, so one class covers every not-found, conflict and validation case: `new ApiException(ErrorCode.AIRPORT_NOT_FOUND, "Airport not found: XXX")` |
 | Subclasses | Only where a response carries extra fields: `SeatUnavailableException` (`unavailableSeats`), `InvalidSeatException` (`invalidSeats`) |
 | `ErrorCode` | Enum of every code with its HTTP status (§6) |
@@ -267,7 +267,7 @@ Four layers, each doing only what it is best placed to do:
 | --- | --- | --- |
 | Bean Validation on request records / parameters | Required fields; `flightNumber` matches `^[A-Z0-9]{2}\d{1,4}$`; airport codes `^[A-Z]{3}$`; times `HH:mm`; ≥ 1 operating day; `origin ≠ destination` (`@AssertTrue` on the record); passengers non-empty; name non-blank, ≤ 120 chars; seat number non-blank; search `date` parses as ISO date | 400 `VALIDATION_ERROR` with `errors: [{field, message}]` |
 | `BookingRequestValidator` (service, before the transaction's first query) | `validatePassengerCount` (1..`maxSeatsPerBooking`); `normaliseSeatNumbers` (trim, upper-case); `validateSeatFormat` (`^[1-9]\d?[A-Z]$`); `rejectDuplicateSeats` | 400 `VALIDATION_ERROR` |
-| Services and domain, under the lock | Flight exists; not departed; every seat in the aircraft's `SeatLayout`; seats not taken; booking state allows the transition | 404 / 409 / 400 `INVALID_SEAT` |
+| Services and domain, under the lock | Flight exists; not departed; inside the booking window; every seat in the aircraft's `SeatLayout`; seats not taken; booking state allows the transition | 404 / 409 / 400 `OUTSIDE_BOOKING_WINDOW` / 400 `INVALID_SEAT` |
 | Search and schedule services | Search date within `[today, today + 365]`; airports and aircraft exist; flight number not used | 400 `OUTSIDE_BOOKING_WINDOW`, 404, 409 |
 | Database constraints | Unique flight number, unique (schedule, date), unique live seat, unique reference, counter bounds, status values, route, code formats | Last line of defence; the unique ones are mapped to 409 |
 
@@ -308,7 +308,7 @@ duplicate flight number) are `409`.
 | --- | --- | --- |
 | 400 | `VALIDATION_ERROR` | Malformed JSON; missing or badly formatted fields/parameters; duplicate seats in one request; origin equals destination; too many passengers |
 | 400 | `INVALID_SEAT` | Seat not on the aircraft (lists `invalidSeats`) |
-| 400 | `OUTSIDE_BOOKING_WINDOW` | Search date before today or more than 365 days ahead |
+| 400 | `OUTSIDE_BOOKING_WINDOW` | Search date, or the date of a flight being booked, outside [today, today + `airline.booking-window-days`] |
 | 404 | `AIRPORT_NOT_FOUND`, `AIRCRAFT_NOT_FOUND`, `SCHEDULE_NOT_FOUND`, `FLIGHT_NOT_FOUND`, `BOOKING_NOT_FOUND` | Unknown identifier |
 | 404 | `RESOURCE_NOT_FOUND` | No endpoint at that path |
 | 405 | `METHOD_NOT_ALLOWED` | Endpoint exists, HTTP method does not (response carries `Allow`) |
@@ -335,7 +335,7 @@ duplicate flight number) are `409`.
   `SEAT_UNAVAILABLE`; `uq_schedule_flight_number` → 409 `DUPLICATE_FLIGHT_NUMBER`; anything else
   → 500.
 - `PessimisticLockingFailureException` (includes lock timeouts) → 503 `LOCK_TIMEOUT` with
-  `Retry-After: 1`.
+  `Retry-After` from `airline.retry-after` (default 1 s).
 - Any other `Exception` → 500 `INTERNAL_ERROR` with the generic detail "An unexpected error occurred".
 - `detail` is never empty: Spring's text is kept when present and safe; ours replaces it when
   missing, for unknown paths ("No endpoint matches this path") and for malformed JSON
@@ -353,7 +353,7 @@ COMMITTED. `spring.jpa.open-in-view=false`, so all loading happens inside the se
 | `ScheduleService.extendInstanceWindow` | read-write | For each schedule: generate `[today, today+365]`, bulk insert with `ON CONFLICT DO NOTHING`; return total inserted. Idempotent, safe on several nodes |
 | `FlightSearchService.search` | read-only | §4.2, §8 |
 | `SeatMapService.getSeatMap` | read-only | Load instance + aircraft → taken seats → walk the layout |
-| `BookingService.createBooking` | read-write | Validate request → **lock instance** → expire overdue holds → departed? → seats in layout? → taken seats (`SeatOccupancyQueries.takenSeats` ∩ requested)? → PNR → `policy.newBooking` → `saveAndFlush` → `instance.reserve(n)` |
+| `BookingService.createBooking` | read-write | Validate request → **lock instance** → expire overdue holds → departed? → inside the booking window? → seats in layout? → taken seats (`SeatOccupancyQueries.takenSeats` ∩ requested)? → PNR → `policy.newBooking` → `saveAndFlush` → `instance.reserve(n)` |
 | `BookingService.getBooking` | read-only | Load booking with seats by reference → load its instance → result with `effectiveStatus(now)` |
 | `BookingService.confirmBooking` | read-write | Instance id by reference → **lock instance** → expire overdue holds → load booking with seats → CONFIRMED: return; CANCELLED: 409 `BOOKING_NOT_CONFIRMABLE`; EXPIRED: 409 `HOLD_EXPIRED`; departed: 409 `FLIGHT_NOT_BOOKABLE`; else `booking.confirm(now)` |
 | `BookingService.cancelBooking` | read-write | Instance id by reference → **lock instance** → expire overdue holds → load booking with seats → CANCELLED/EXPIRED: return unchanged; `cancellationPolicy.verifyCancellable(...)` (409 `BOOKING_NOT_CANCELLABLE`); `n = booking.cancel(now)`, `instance.release(n)` |
@@ -421,7 +421,7 @@ Error logging is by status class, in `GlobalExceptionHandler`:
 
 ## 10. Testing approach
 
-298 tests, all run by `./mvnw verify`. Integration tests extend one `IntegrationTest` base: one
+300 tests, all run by `./mvnw verify`. Integration tests extend one `IntegrationTest` base: one
 Spring context and one PostgreSQL 16 container (Testcontainers, real Flyway migrations), tables
 truncated before each test, a `MutableClock` reset to 2026-01-05T00:00Z, and no `@Transactional`
 on tests (they must see committed data).
@@ -429,7 +429,7 @@ on tests (they must see committed data).
 | Level | Classes | What |
 | --- | --- | --- |
 | Unit (test-first) | `SeatLayoutTest`, `FlightInstanceGeneratorTest`, `FlightScheduleTest`, `FlightInstanceTest`, `BookingTest`, `BookingHoldTest`, `BookingStatusTest`, `BookingRequestValidatorTest`, `PnrGeneratorTest`, `BookingPolicyTest`, `BeforeDepartureCancellationPolicyTest`, `GlobalExceptionHandlerTest` | Pure logic without Spring: seat labels and validity; weekdays, inclusive window ends, leap day, overnight; the full status-transition table; hold expiry; validation rules; constraint-name mapping |
-| API (MockMvc) | `ScheduleApiTest`, `FlightSearchApiTest`, `SeatMapApiTest`, `BookingApiTest`, `BookingCancellationApiTest`, `InstanceWindowJobTest`, `ReferenceDataTest`, `EdgeCasesTest` | Every endpoint and response field; all-or-nothing booking; cancel then rebook; window job idempotent and gap-filling; window ends, overnight, late-day creation, last free seat |
+| API (MockMvc) | `ScheduleApiTest`, `FlightSearchApiTest`, `SeatMapApiTest`, `BookingApiTest`, `BookingCancellationApiTest`, `InstanceWindowJobTest`, `ReferenceDataTest`, `EdgeCasesTest`, `BookingWindowConfigTest` (own context, 30-day window) | Every endpoint and response field; all-or-nothing booking; cancel then rebook; window job idempotent and gap-filling; window ends, overnight, late-day creation, last free seat |
 | Error contract | `ErrorContractTest`, `LockTimeoutTest`, `RequestIdFilterTest` | All 21 reachable error codes share one shape and leak nothing; lock timeout → 503 with `Retry-After`; request ids |
 | Concurrency | `BookingConcurrencyTest`, `CancellationConcurrencyTest`, `DuplicateFlightNumberRaceTest` (helpers in `ConcurrencySupport`) | 50 threads on one seat → exactly 1 success; 50 seats; overlapping 1A+1B vs 1B+1C; 10 concurrent cancels; cancel vs book; duplicate flight number never 500. After each: counter invariant and no seat taken twice. Shown to fail with the lock and index removed (10 of 50 succeeded) |
 | Seat hold on | `SeatHoldTest` (own context, `airline.seat-hold.enabled=true`) | Hold → confirm; expiry frees seats for the next customer; confirm after expiry → 409; confirm-vs-expiry race decided by the clock |

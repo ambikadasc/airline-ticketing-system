@@ -19,7 +19,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class BookingRequestValidatorTest {
 
 	private final BookingRequestValidator validator = new BookingRequestValidator(
-			new AirlineProperties(365, 9, "0 5 0 * * *", new AirlineProperties.SeatHold(false, Duration.ofMinutes(10))));
+			new AirlineProperties(365, 9, "0 5 0 * * *", Duration.ofSeconds(1),
+					new AirlineProperties.SeatHold(false, Duration.ofMinutes(10))));
 
 	@Test
 	void normalisesSeatNumbersToTrimmedUpperCase() {

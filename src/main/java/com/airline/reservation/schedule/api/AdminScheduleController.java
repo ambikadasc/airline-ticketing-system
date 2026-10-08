@@ -28,7 +28,7 @@ public class AdminScheduleController {
 		this.scheduleService = scheduleService;
 	}
 
-	@Operation(summary = "Create a flight schedule and generate its flight instances for the next 365 days")
+	@Operation(summary = "Create a flight schedule and generate its flight instances for the booking window (airline.booking-window-days)")
 	@PostMapping
 	public ResponseEntity<ScheduleResult> create(@Valid @RequestBody CreateScheduleRequest request) {
 		ScheduleResult created = scheduleService.createSchedule(request.toCommand());

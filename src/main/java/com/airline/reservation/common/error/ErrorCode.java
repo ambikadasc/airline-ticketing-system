@@ -31,7 +31,9 @@ public enum ErrorCode {
 	HOLD_EXPIRED(HttpStatus.CONFLICT),
 
 	INTERNAL_ERROR(HttpStatus.INTERNAL_SERVER_ERROR),
-	LOCK_TIMEOUT(HttpStatus.SERVICE_UNAVAILABLE);
+	LOCK_TIMEOUT(HttpStatus.SERVICE_UNAVAILABLE),
+	/** Temporary failure where nothing was changed (e.g. a booking-reference clash); retrying is safe. */
+	RETRY_LATER(HttpStatus.SERVICE_UNAVAILABLE);
 
 	private final HttpStatus status;
 

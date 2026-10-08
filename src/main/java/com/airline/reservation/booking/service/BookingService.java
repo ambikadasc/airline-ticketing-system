@@ -2,6 +2,7 @@ package com.airline.reservation.booking.service;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Set;
 
@@ -18,6 +19,7 @@ import com.airline.reservation.booking.domain.PassengerSeat;
 import com.airline.reservation.booking.persistence.BookingRepository;
 import com.airline.reservation.booking.service.policy.BookingPolicy;
 import com.airline.reservation.booking.service.policy.CancellationPolicy;
+import com.airline.reservation.common.config.AirlineProperties;
 import com.airline.reservation.common.error.ApiException;
 import com.airline.reservation.common.error.ErrorCode;
 import com.airline.reservation.flight.domain.FlightInstance;
@@ -43,12 +45,13 @@ public class BookingService {
 	private final PnrGenerator pnrGenerator;
 	private final BookingPolicy bookingPolicy;
 	private final CancellationPolicy cancellationPolicy;
+	private final AirlineProperties properties;
 	private final Clock clock;
 
 	public BookingService(BookingRepository bookingRepository, FlightInstanceRepository instanceRepository,
 			AircraftRepository aircraftRepository, SeatOccupancyQueries seatOccupancy,
 			BookingRequestValidator validator, PnrGenerator pnrGenerator, BookingPolicy bookingPolicy,
-			CancellationPolicy cancellationPolicy, Clock clock) {
+			CancellationPolicy cancellationPolicy, AirlineProperties properties, Clock clock) {
 		this.bookingRepository = bookingRepository;
 		this.instanceRepository = instanceRepository;
 		this.aircraftRepository = aircraftRepository;
@@ -57,6 +60,7 @@ public class BookingService {
 		this.pnrGenerator = pnrGenerator;
 		this.bookingPolicy = bookingPolicy;
 		this.cancellationPolicy = cancellationPolicy;
+		this.properties = properties;
 		this.clock = clock;
 	}
 
@@ -76,6 +80,12 @@ public class BookingService {
 
 		if (flight.isDepartedAt(now)) {
 			throw new ApiException(ErrorCode.FLIGHT_NOT_BOOKABLE, "Flight has already departed: " + flight.getId());
+		}
+		// Instances may exist beyond the window if it was shortened; they are not bookable.
+		LocalDate lastBookableDate = properties.lastBookableDate(LocalDate.now(clock));
+		if (flight.getFlightDate().isAfter(lastBookableDate)) {
+			throw new ApiException(ErrorCode.OUTSIDE_BOOKING_WINDOW,
+					"Flights can be booked up to " + lastBookableDate + "; this flight is on " + flight.getFlightDate());
 		}
 
 		SeatLayout layout = aircraftRepository.findById(flight.getAircraftId()).orElseThrow().seatLayout();
@@ -210,7 +220,9 @@ public class BookingService {
 				return reference;
 			}
 		}
-		throw new IllegalStateException("No unused booking reference after " + MAX_REFERENCE_ATTEMPTS + " attempts");
+		// Practically unreachable (it needs hundreds of millions of stored bookings); nothing was booked.
+		throw new ApiException(ErrorCode.RETRY_LATER,
+				"No free booking reference could be allocated; nothing was booked. Please retry");
 	}
 
 }

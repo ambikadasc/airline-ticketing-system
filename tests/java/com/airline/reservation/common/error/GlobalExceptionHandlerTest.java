@@ -1,6 +1,7 @@
 package com.airline.reservation.common.error;
 
 import java.sql.SQLException;
+import java.time.Duration;
 
 import org.hibernate.exception.ConstraintViolationException;
 import org.junit.jupiter.api.Test;
@@ -8,6 +9,8 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.mock.web.MockHttpServletRequest;
+
+import com.airline.reservation.common.config.AirlineProperties;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -17,7 +20,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class GlobalExceptionHandlerTest {
 
-	private final GlobalExceptionHandler handler = new GlobalExceptionHandler();
+	private final GlobalExceptionHandler handler = new GlobalExceptionHandler(new AirlineProperties(365, 9,
+			"0 5 0 * * *", Duration.ofSeconds(1), new AirlineProperties.SeatHold(false, Duration.ofMinutes(10))));
 	private final MockHttpServletRequest request = new MockHttpServletRequest("POST", "/api/v1/bookings");
 
 	@Test
@@ -36,6 +40,17 @@ class GlobalExceptionHandlerTest {
 
 		assertThat(response.getStatusCode().value()).isEqualTo(409);
 		assertThat(response.getBody().getProperties()).containsEntry("code", "DUPLICATE_FLIGHT_NUMBER");
+	}
+
+	@Test
+	void aBookingReferenceClashIsATemporaryConditionToRetry() {
+		ResponseEntity<ProblemDetail> response = handler.handleDataIntegrity(violationOf("uq_booking_reference"),
+				request);
+
+		assertThat(response.getStatusCode().value()).isEqualTo(503);
+		assertThat(response.getHeaders().getFirst("Retry-After")).isEqualTo("1");
+		assertThat(response.getBody().getProperties()).containsEntry("code", "RETRY_LATER");
+		assertThat(response.getBody().getDetail()).contains("nothing was booked").doesNotContain("uq_");
 	}
 
 	@Test

@@ -4,7 +4,7 @@
 
 The backend for a single airline. A back office defines flight schedules; customers search
 flights, view seat maps, book seats and cancel bookings. Bookings are accepted for flights up to
-365 days ahead.
+365 days ahead; the window is configuration (`airline.booking-window-days`).
 
 **In scope:** schedule creation (admin), flight instance generation, flight search, seat map,
 booking, booking lookup, cancellation. An optional **seat hold** (book now, confirm later) can be
@@ -351,4 +351,5 @@ The brief is single-airline, but no part of the design depends on it.
 | 2026-10-08 | Phase 5: cancellation rules behind `CancellationPolicy`; lock order and idempotent cancel as designed (no change to this document) |
 | 2026-10-08 | Phase 4b: `hold_expires_at` is kept after a hold ends (ER diagram and schema snapshot wording); hold expiry rounded to whole seconds; expiry flushes before the SQL seat check (LLD §8) |
 | 2026-10-08 | Phase 6: incoming `X-Request-Id` accepted only if safe (≤ 64 chars, `[A-Za-z0-9._-]`), else a UUID (LLD §2) |
+| 2026-10-08 | Configurable window: `airline.booking-window-days` is the single definition of the window (`AirlineProperties.lastBookableDate`), now also enforced at booking; `Retry-After` is configuration (`airline.retry-after`); Compose passes `AIRLINE_*` overrides through (LLD §2, §5, §6) |
 | 2026-10-08 | Phase 8: documentation finished: links to README and ADRs; multiple-airlines and aircraft-rotation notes in §11; LLD aligned with the final code |

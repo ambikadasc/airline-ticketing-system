@@ -1,9 +1,9 @@
-# Private working material for Claude Code (not part of the submission)
+# Local working notes (not part of the project)
 prep/
-# Decide before submission whether to commit CLAUDE.md (AI use is allowed).
-# Remove the next line to commit it.
+/PLAN.md
 CLAUDE.md
 .claude/settings.local.json
+*.xlsx
 
 # Build output
 target/
@@ -31,5 +31,3 @@ Thumbs.db
 # Logs
 *.log
 logs/
-/PLAN.md
-*.xlsx
