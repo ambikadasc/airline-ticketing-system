@@ -53,3 +53,14 @@ One line per decision, newest phase last. The reasoning for the major ones is in
 - Departed flights still have a seat map (read by id); search hides them and booking rejects them.
 - Query-parameter constraint failures (`HandlerMethodValidationException`) also return an `errors` list, with the parameter name as `field`.
 - The seat-map availability enum is `SeatAvailability { AVAILABLE, BOOKED }`, named apart from booking's `SeatStatus`.
+
+## Phase 4 – Booking
+- **Race test shown failing, then passing (A5/A8).** 50 threads book seat 12A on one flight at once. With the flight lock replaced by a plain read *and* `uq_active_seat` commented out of V3: **10 successes out of 50, in each of 3 runs** (10 = the connection-pool size: every transaction that ran concurrently booked the seat). With `findByIdForUpdate` and the index restored (V3 byte-identical, `git diff` empty): **exactly 1 success, 49 `SeatUnavailableException`, in each of 3 runs.** The broken state was never committed.
+- The concurrency class (same seat ×50, 50 different seats, overlapping 1A+1B / 1B+1C ×20) passed 5 runs in a row; after each scenario the counter equals total minus active seats and no seat is active twice.
+- The seat-conflict check reuses `SeatOccupancyQueries.takenSeats`: one definition of a taken seat for seat map, search and booking.
+- `BookingPolicy`, HELD/EXPIRED and confirm are deferred to Phase 4b; `BookingStatus`/`SeatStatus` gain constants in the phase that uses them.
+- `ApiException.extraProperties()` lets subclasses (`SeatUnavailableException`, `InvalidSeatException`) add fields such as `unavailableSeats` to the error body.
+- The maximum passengers per booking is checked by `BookingRequestValidator` from `airline.max-seats-per-booking`, not a hard-coded `@Size`.
+- Booking references are matched exactly as given (PNRs are upper case).
+- A seat conflict is logged at INFO with flight id and seat numbers; passenger names are never logged.
+- The unique-index violation → 409 mapping is added in Phase 6; with the lock in place the index is not reached in these tests.

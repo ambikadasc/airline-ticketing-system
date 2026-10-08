@@ -1,5 +1,7 @@
 package com.airline.reservation.common.error;
 
+import java.util.Map;
+
 /**
  * An expected failure of a use case (unknown id, conflict, rule broken). The handler turns it
  * into a ProblemDetail with the code's HTTP status. The detail message is shown to the client,
@@ -16,6 +18,11 @@ public class ApiException extends RuntimeException {
 
 	public ErrorCode getCode() {
 		return code;
+	}
+
+	/** Extra fields for the error body, e.g. the seats that were unavailable. None by default. */
+	public Map<String, Object> extraProperties() {
+		return Map.of();
 	}
 
 }

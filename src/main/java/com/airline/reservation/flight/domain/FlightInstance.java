@@ -68,6 +68,23 @@ public class FlightInstance {
 				departureAt, arrivalAt, totalSeats);
 	}
 
+	/**
+	 * Takes seats out of the available count. Called only while this row is locked, after the
+	 * requested seats were checked free, so running short means a bug, not a user error.
+	 */
+	public void reserve(int seats) {
+		if (seats > availableSeats) {
+			throw new IllegalStateException(
+					"Cannot reserve " + seats + " seats on flight " + id + ": only " + availableSeats + " available");
+		}
+		availableSeats -= seats;
+	}
+
+	/** A flight can be booked only before it departs. */
+	public boolean isDepartedAt(Instant now) {
+		return !departureAt.isAfter(now);
+	}
+
 	public Long getId() {
 		return id;
 	}

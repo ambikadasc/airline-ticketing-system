@@ -103,7 +103,7 @@ shape are the same today. Request records stay in `api` and map to `*Command` re
 | `BookingSeat` | Child entity (seat number, passenger name, status, timestamps); `activate()`, `release(now)`; package-private, changed only through `Booking` |
 | `BookingStatus` | Enum `HELD, CONFIRMED, CANCELLED, EXPIRED` with `canTransitionTo(target)` (§3) |
 | `SeatStatus` | Enum `ACTIVE, HELD, RELEASED` |
-| `BookingRepository` | `findFlightInstanceIdByReference(ref)` (returns `Optional<Long>`, no entity load), `findWithSeatsByReference(ref)` (join fetch), `findOverdueHolds(instanceId, now)`, `findTakenSeats(instanceId, seats)`, `existsByReference(ref)` |
+| `BookingRepository` | `findFlightInstanceIdByReference(ref)` (returns `Optional<Long>`, no entity load), `findWithSeatsByReference(ref)` (join fetch), `findOverdueHolds(instanceId, now)`, `existsByReference(ref)`. The seat-conflict check does not live here: it reuses `SeatOccupancyQueries.takenSeats` (flight), the same "taken" rule as the seat map |
 | `BookingPolicy` | Interface, the Strategy: `Booking newBooking(String reference, long flightInstanceId, List<PassengerSeat> passengers, Instant now)` |
 | `ImmediateConfirmationPolicy` | Returns `Booking.confirmed(...)` |
 | `SeatHoldPolicy` | Returns `Booking.held(..., now.plus(ttl))` |
@@ -348,7 +348,7 @@ COMMITTED. `spring.jpa.open-in-view=false`, so all loading happens inside the se
 | `ScheduleService.extendInstanceWindow` | read-write | For each schedule: generate `[today, today+365]`, bulk insert with `ON CONFLICT DO NOTHING`; return total inserted. Idempotent, safe on several nodes |
 | `FlightSearchService.search` | read-only | §4.2, §8 |
 | `SeatMapService.getSeatMap` | read-only | Load instance + aircraft → taken seats → walk the layout |
-| `BookingService.createBooking` | read-write | Validate request → **lock instance** → expire overdue holds → departed? → seats in layout? → taken seats? → PNR → `policy.newBooking` → `saveAndFlush` → `instance.reserve(n)` |
+| `BookingService.createBooking` | read-write | Validate request → **lock instance** → expire overdue holds → departed? → seats in layout? → taken seats (`SeatOccupancyQueries.takenSeats` ∩ requested)? → PNR → `policy.newBooking` → `saveAndFlush` → `instance.reserve(n)` |
 | `BookingService.getBooking` | read-only | Load booking with seats by reference → load its instance → result with `effectiveStatus(now)` |
 | `BookingService.confirmBooking` | read-write | Instance id by reference → **lock instance** → expire overdue holds → load booking with seats → CONFIRMED: return; CANCELLED: 409 `BOOKING_NOT_CONFIRMABLE`; EXPIRED: 409 `HOLD_EXPIRED`; departed: 409 `FLIGHT_NOT_BOOKABLE`; else `booking.confirm(now)` |
 | `BookingService.cancelBooking` | read-write | Instance id by reference → **lock instance** → expire overdue holds → load booking with seats → CANCELLED/EXPIRED: return unchanged; `cancellationPolicy.verifyCancellable(...)` (409 `BOOKING_NOT_CANCELLABLE`); `n = booking.cancel(now)`, `instance.release(n)` |
