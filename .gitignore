@@ -32,4 +32,4 @@ Thumbs.db
 *.log
 logs/
 /PLAN.md
-/Vision_Bank_Assignment_Tracker.xlsx
+*.xlsx
