@@ -1,0 +1,27 @@
+# Overrides for the throwaway load-test stack. Used only through scripts/load-test.sh:
+#   docker compose -p airline-load -f docker-compose.yml -f load/docker-compose.load.yml ...
+#
+# A separate Compose project means separate containers, network and database volume, so the
+# working stack (:8080, :5433) is never touched and `down -v` removes every trace of a run.
+services:
+  db:
+    ports: !override []            # not published; only this stack's app and psql reach it
+    volumes:
+      - ./load:/load:ro            # seed.sql, run with psql inside the container
+
+  app:
+    ports: !override
+      - "127.0.0.1:8081:8080"      # beside the working stack's 8080
+    environment:
+      # Pool metrics for the run summary (the working stack exposes only health).
+      MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: health,metrics
+
+  jmeter:
+    image: alpine/jmeter:5.6.3     # Apache JMeter, headless; nothing to install on the host
+    profiles: [tools]              # started only by `run`, never by `up`
+    volumes:
+      - ./load:/load:ro            # the test plan
+      - ./load/results:/results    # refs.csv, routes.csv, run.jtl, report/ (git-ignored)
+    depends_on:
+      app:
+        condition: service_healthy
