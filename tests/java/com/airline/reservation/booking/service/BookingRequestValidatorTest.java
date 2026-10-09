@@ -20,7 +20,8 @@ class BookingRequestValidatorTest {
 
 	private final BookingRequestValidator validator = new BookingRequestValidator(
 			new AirlineProperties(365, 9, "0 5 0 * * *", Duration.ofSeconds(1),
-					new AirlineProperties.SeatHold(false, Duration.ofMinutes(10))));
+					new AirlineProperties.SeatHold(false, Duration.ofMinutes(10)),
+					new AirlineProperties.LookupThrottle(10, Duration.ofMinutes(1))));
 
 	@Test
 	void normalisesSeatNumbersToTrimmedUpperCase() {

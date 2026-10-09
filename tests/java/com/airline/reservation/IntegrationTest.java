@@ -8,6 +8,8 @@ import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 
+import com.airline.reservation.booking.api.LookupMissLimiter;
+
 /**
  * Base class for integration tests. Every subclass shares one Spring context and therefore one
  * PostgreSQL container.
@@ -30,9 +32,13 @@ public abstract class IntegrationTest {
 	@Autowired
 	protected MutableClock clock;
 
+	@Autowired
+	private LookupMissLimiter lookupMissLimiter;
+
 	@BeforeEach
 	void cleanTransactionalTables() {
 		clock.reset();
+		lookupMissLimiter.reset();
 		jdbcTemplate.execute("TRUNCATE booking_seat, booking, flight_instance, flight_schedule_day, flight_schedule "
 				+ "RESTART IDENTITY CASCADE");
 	}

@@ -34,7 +34,8 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 /**
  * Every error code reachable over HTTP (seat hold off) comes back in the same shape: a ProblemDetail
  * with status, title, detail, code and the request id, and nothing internal in it.
- * HOLD_EXPIRED needs the seat hold and is checked in SeatHoldTest.
+ * HOLD_EXPIRED needs the seat hold and is checked in SeatHoldTest; LOCK_TIMEOUT and the pool
+ * exhaustion case have their own tests.
  */
 class ErrorContractTest extends IntegrationTest {
 
@@ -110,6 +111,17 @@ class ErrorContractTest extends IntegrationTest {
 						clock.reset();
 					}
 				}));
+	}
+
+	@TestFactory
+	Stream<DynamicTest> tooManyUnsuccessfulLookupsAreRefused() {
+		return Stream.of(DynamicTest.dynamicTest("11th unsuccessful lookup in a minute -> 429 RATE_LIMITED", () -> {
+			for (int i = 0; i < 10; i++) {
+				mockMvc.perform(get("/api/v1/bookings/ZZZZZZ"));
+			}
+			assertContract(get("/api/v1/bookings/ZZZZZZ"), 429, "RATE_LIMITED",
+					response -> assertThat(response.getHeader("Retry-After")).isEqualTo("60"));
+		}));
 	}
 
 	@TestFactory

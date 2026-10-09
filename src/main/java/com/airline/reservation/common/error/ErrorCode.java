@@ -30,6 +30,9 @@ public enum ErrorCode {
 	BOOKING_NOT_CONFIRMABLE(HttpStatus.CONFLICT),
 	HOLD_EXPIRED(HttpStatus.CONFLICT),
 
+	/** Too many unsuccessful booking lookups from one client; the window end is in Retry-After. */
+	RATE_LIMITED(HttpStatus.TOO_MANY_REQUESTS),
+
 	INTERNAL_ERROR(HttpStatus.INTERNAL_SERVER_ERROR),
 	LOCK_TIMEOUT(HttpStatus.SERVICE_UNAVAILABLE),
 	/** Temporary failure where nothing was changed (e.g. a booking-reference clash); retrying is safe. */

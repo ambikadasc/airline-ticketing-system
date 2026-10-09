@@ -23,7 +23,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 class GlobalExceptionHandlerTest {
 
 	private final GlobalExceptionHandler handler = new GlobalExceptionHandler(new AirlineProperties(365, 9,
-			"0 5 0 * * *", Duration.ofSeconds(1), new AirlineProperties.SeatHold(false, Duration.ofMinutes(10))));
+			"0 5 0 * * *", Duration.ofSeconds(1), new AirlineProperties.SeatHold(false, Duration.ofMinutes(10)),
+			new AirlineProperties.LookupThrottle(10, Duration.ofMinutes(1))));
 	private final MockHttpServletRequest request = new MockHttpServletRequest("POST", "/api/v1/bookings");
 
 	@Test

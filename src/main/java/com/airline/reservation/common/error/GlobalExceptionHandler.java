@@ -62,7 +62,9 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 		}
 		ProblemDetail problem = problem(ex.getCode(), ex.getMessage());
 		ex.extraProperties().forEach(problem::setProperty);
-		return ResponseEntity.status(ex.getCode().status()).body(problem);
+		ResponseEntity.BodyBuilder response = ResponseEntity.status(ex.getCode().status());
+		ex.retryAfter().ifPresent(wait -> response.header(HttpHeaders.RETRY_AFTER, String.valueOf(wait.toSeconds())));
+		return response.body(problem);
 	}
 
 	/**

@@ -25,7 +25,8 @@ public record AirlineProperties(
 		@NotBlank String instanceJobCron,
 		/* Sent as Retry-After with a 503 (flight lock not granted in time, or a booking-reference clash). */
 		@NotNull Duration retryAfter,
-		@Valid @NotNull SeatHold seatHold) {
+		@Valid @NotNull SeatHold seatHold,
+		@Valid @NotNull LookupThrottle lookupThrottle) {
 
 	/**
 	 * The last date that can be searched or booked: today plus the booking window. The single
@@ -39,6 +40,13 @@ public record AirlineProperties(
 	 * Optional seat hold. With {@code enabled = false} (the default) bookings are confirmed immediately.
 	 */
 	public record SeatHold(boolean enabled, @NotNull Duration ttl) {
+	}
+
+	/**
+	 * Per-client limit on unsuccessful booking lookups (404s on lookup, confirm and cancel): the
+	 * booking reference is the only credential, so guessing it must stay slow.
+	 */
+	public record LookupThrottle(@Positive int maxMisses, @NotNull Duration window) {
 	}
 
 }

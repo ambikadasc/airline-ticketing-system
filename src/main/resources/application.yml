@@ -43,3 +43,8 @@ airline:
   seat-hold:
     enabled: false
     ttl: PT10M
+  # A client that gets more than max-misses BOOKING_NOT_FOUND answers within the window is refused
+  # (429) on lookup, confirm and cancel until the window ends. Guessing references must stay slow.
+  lookup-throttle:
+    max-misses: 10
+    window: PT1M

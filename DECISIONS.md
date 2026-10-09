@@ -34,6 +34,8 @@ ones, with the alternatives that were rejected, is in `hld/architecture.md` (sec
 - Idempotent: cancelling a CANCELLED (or EXPIRED) booking returns it unchanged.
 - The one rule, "before departure", is an inline check in `BookingService`; a `CancellationPolicy` Strategy is introduced only when a second rule exists.
 - Lookup and cancel use the reference only; a surname check is a documented future step.
+- Unsuccessful lookups (404 on lookup, confirm, cancel) are throttled per client, 10 per minute by default (`airline.lookup-throttle.*`), then 429 `RATE_LIMITED` with `Retry-After` until the window ends: the reference is the only credential, so guessing must stay slow. Only misses count, so customers are never affected; search and booking are never throttled.
+- The throttle is a Spring MVC interceptor registered by path pattern, not a servlet filter: it matches exactly what Spring routes to the reference endpoints (no path-variant bypass) and rejects with an `ApiException`, so the error body comes from the one handler. Per instance, keyed by `remoteAddr` (no header parsing); memory-bounded.
 
 ## Seat hold (optional, off by default)
 - `BookingPolicy` Strategy (`ImmediateConfirmationPolicy` or `SeatHoldPolicy`), chosen once from `airline.seat-hold.enabled` (ADR 0003).
@@ -50,13 +52,15 @@ ones, with the alternatives that were rejected, is in `hld/architecture.md` (sec
 - `X-Request-Id` is accepted only if it matches `^[A-Za-z0-9._-]{1,64}$`, otherwise a UUID is generated; the id is on every log line and in every error body.
 - Distributed tracing is not built (one service, one database); it is a documented scaling step.
 - Pool exhaustion (`CannotCreateTransactionException`: no connection obtained, nothing started) → 503 `RETRY_LATER`; a connection lost mid-transaction stays a 500 because the outcome is unknown and a "retry" promise could cause a double booking.
-- Rate limiting and circuit breakers are not built (not asked for by the brief; the fail-fast timeouts bound the overload chain); they are documented scaling steps with triggers.
+- Backpressure on booking writes (rate limiting, a circuit breaker) is not built: the fail-fast timeouts bound the overload chain today, and it can be introduced later as load requires; the triggers are documented. Spring has no built-in, so the step is a library: Resilience4j or Bucket4j in the service, Spring Cloud Gateway (Redis) in front for a cluster-wide limit.
+- The lookup throttle is hand-written, not Resilience4j/Bucket4j: those count requests, this counts misses (404s) so customers are never affected; a library would still need the same outcome-aware interceptor around it, leaving only the window arithmetic to replace.
 
 ## Configuration
 - All business settings are `airline.*` properties, overridable by environment variable (`AIRLINE_BOOKING_WINDOW_DAYS` etc.) and passed through by Compose when set; `airline.retry-after` serves both 503s.
 - Format rules (seat, flight number, reference) stay in code and in database CHECKs because changing them needs a migration.
 - PostgreSQL is published on `127.0.0.1:5433` by Compose so a local PostgreSQL on 5432 does not clash; the application's default URL matches.
 - The pool is explicit (10 connections) and a request waits at most 2 s for one (not Hikari's 30 s default), so a busy flight cannot park every request thread behind the pool; with `lock_timeout = 3s` these are the three bounds on overload.
+- Ten connections is a deliberate size: transactions last milliseconds, pools should stay near 2 × database cores, a bigger pool does not help a hot flight, and `instances × pool` must stay under PostgreSQL's `max_connections`. The scaling ladder (pool size → instances → max_connections/PgBouncer → read pool → rate limiting) is documented with its signals in the HLD.
 
 ## Data model and database
 - PostgreSQL 16, Flyway (forward-only V1–V5; seed data in V4), Hibernate validates only; tests run on the same engine (ADR 0006).

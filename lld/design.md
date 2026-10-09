@@ -31,7 +31,8 @@ com.airline.reservation
 │   ├── domain/       FlightInstance
 │   └── persistence/  FlightInstanceRepository, FlightInstanceBulkWriter, SeatOccupancyQueries
 └── booking/
-    ├── api/          BookingController, CreateBookingRequest
+    ├── api/          BookingController, CreateBookingRequest,
+    │                 LookupMissLimiter, BookingLookupThrottle, BookingWebConfig
     ├── service/      BookingService, BookingRequestValidator, PnrGenerator,
     │                 CreateBookingCommand, BookingResult
     ├── service/policy/  BookingPolicy, ImmediateConfirmationPolicy, SeatHoldPolicy,
@@ -114,6 +115,8 @@ shape are the same today. Request records stay in `api` and map to `*Command` re
 | `PnrGenerator` | 6 characters from `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` (no 0/O/1/I) via `SecureRandom`. A plain class, no interface: there is no second implementation |
 | `BookingService` | `createBooking`, `getBooking`, `confirmBooking`, `cancelBooking` (§7). `newReference()` draws up to 5 codes against `existsByReference`; if all are taken it throws `RETRY_LATER` (503) |
 | `BookingController` | `POST /api/v1/bookings`, `GET /api/v1/bookings/{reference}`, `POST .../{reference}/confirm`, `POST .../{reference}/cancel` |
+| `LookupMissLimiter` | Per-client count of `BOOKING_NOT_FOUND` answers in a fixed window (`airline.lookup-throttle`, default 10 per minute); `check(client)` throws `ApiException(RATE_LIMITED, …, retryAfter = time left)` once the count is reached; `recordMiss(client)`; `reset()` for tests. Memory-bounded (expired windows purged past 10,000 clients). Per instance; keyed by `remoteAddr` |
+| `BookingLookupThrottle` | `HandlerInterceptor`: `preHandle` → `check`; `afterCompletion` → `recordMiss` when the response is 404. Registered by `BookingWebConfig` for `/api/v1/bookings/*`, `…/*/confirm`, `…/*/cancel`, i.e. exactly the routes Spring maps to the reference endpoints, so no path variant reaches them unchecked; creating a booking and search are not matched |
 
 ## 3. State machines
 
@@ -329,6 +332,7 @@ duplicate flight number) are `409`.
 | 409 | `BOOKING_NOT_CANCELLABLE` | Cancelling a booking on a flight that has departed |
 | 409 | `HOLD_EXPIRED` | Confirming a hold that has expired (status `EXPIRED`, or `HELD` past `hold_expires_at`) |
 | 409 | `BOOKING_NOT_CONFIRMABLE` | Confirming a `CANCELLED` booking |
+| 429 | `RATE_LIMITED` | More than `airline.lookup-throttle.max-misses` unsuccessful lookup/confirm/cancel attempts from one client within the window; `Retry-After` = seconds left in the window |
 | 503 | `LOCK_TIMEOUT` | Flight lock not acquired within 3 s; header `Retry-After` (`airline.retry-after`, default 1 s) |
 | 503 | `RETRY_LATER` | No pooled connection within `connection-timeout` (2 s), two bookings drew the same reference at the same instant (unique constraint), or no free reference in 5 draws; in every case nothing was changed; header `Retry-After` |
 | 500 | `INTERNAL_ERROR` | Anything unexpected; logged at ERROR with the stack trace, generic message to the client |
@@ -340,7 +344,8 @@ duplicate flight number) are `409`.
   `code` (chosen from the status: 400 → `VALIDATION_ERROR`, 404 → `RESOURCE_NOT_FOUND`, 405, 406,
   415 as in the table) and `requestId` to all of them, and `errors: [{field, message}]` to
   validation failures.
-- `ApiException` → its `ErrorCode` status and code, plus its extra properties.
+- `ApiException` → its `ErrorCode` status and code, plus its extra properties, and a
+  `Retry-After` header when the exception carries one (`retryAfter()`, used by the lookup throttle).
 - `DataIntegrityViolationException` by constraint name: `uq_active_seat` → 409
   `SEAT_UNAVAILABLE`; `uq_schedule_flight_number` → 409 `DUPLICATE_FLIGHT_NUMBER`;
   `uq_booking_reference` → 503 `RETRY_LATER` with `Retry-After`; anything else
@@ -446,7 +451,7 @@ Background job runs have no HTTP request, so `InstanceWindowJob` puts its own ru
 
 ## 10. Testing approach
 
-315 tests, all run by `./mvnw verify`. Integration tests extend one `IntegrationTest` base: one
+329 tests, all run by `./mvnw verify`. Integration tests extend one `IntegrationTest` base: one
 Spring context and one PostgreSQL 16 container (Testcontainers, real Flyway migrations), tables
 truncated before each test, a `MutableClock` reset to 2026-01-05T00:00Z, and no `@Transactional`
 on tests (they must see committed data).
@@ -455,7 +460,7 @@ on tests (they must see committed data).
 | --- | --- | --- |
 | Unit (test-first) | `SeatLayoutTest`, `FlightInstanceGeneratorTest`, `FlightScheduleTest`, `FlightInstanceTest`, `BookingTest`, `BookingHoldTest`, `BookingStatusTest`, `BookingRequestValidatorTest`, `PnrGeneratorTest`, `BookingPolicyTest`, `GlobalExceptionHandlerTest`, `InstanceWindowJobLogIdTest` | Pure logic without Spring: seat labels and validity; weekdays, inclusive window ends, leap day, overnight; the full status-transition table; hold expiry; validation rules; constraint-name mapping |
 | API (MockMvc) | `ScheduleApiTest`, `FlightSearchApiTest`, `SeatMapApiTest`, `BookingApiTest`, `BookingCancellationApiTest`, `InstanceWindowJobTest`, `InstanceWindowApiTest`, `ReferenceDataTest`, `EdgeCasesTest`, `BookingWindowConfigTest` (own context, 30-day window), `SchemaIntegrityTest` (V5 rules) | Every endpoint and response field; all-or-nothing booking; cancel then rebook; window job idempotent and gap-filling; window ends, overnight, late-day creation, last free seat |
-| Error contract | `ErrorContractTest`, `LockTimeoutTest`, `PoolExhaustionTest` (own context: a one-connection pool, held by the test), `BookingReferenceClashTest` (own context; fixed generator + missed check, as in the race), `RequestIdFilterTest` | All 21 reachable error codes share one shape and leak nothing; lock timeout and pool exhaustion → 503 with `Retry-After`; reference clash → 503 `RETRY_LATER`, nothing stored; request ids |
+| Error contract | `ErrorContractTest`, `LockTimeoutTest`, `PoolExhaustionTest` (own context: a one-connection pool, held by the test), `BookingReferenceClashTest` (own context; fixed generator + missed check, as in the race), `LookupThrottleTest`, `LookupMissLimiterTest` (unit, test clock), `RequestIdFilterTest` | All 22 reachable error codes share one shape and leak nothing; lock timeout and pool exhaustion → 503 with `Retry-After`; reference clash → 503 `RETRY_LATER`, nothing stored; the 11th unsuccessful lookup → 429 with `Retry-After` = time left, other clients, search and booking unaffected, path variants counted; request ids |
 | Concurrency | `BookingConcurrencyTest`, `CancellationConcurrencyTest`, `DuplicateFlightNumberRaceTest` (helpers in `ConcurrencySupport`) | 50 threads on one seat → exactly 1 success; 50 seats; overlapping 1A+1B vs 1B+1C; 10 concurrent cancels; cancel vs book; duplicate flight number never 500. After each: counter invariant and no seat taken twice. Shown to fail with the lock and index removed (10 of 50 succeeded) |
 | Seat hold on | `SeatHoldTest` (own context, `airline.seat-hold.enabled=true`) | Hold → confirm; expiry frees seats for the next customer; confirm after expiry → 409; confirm-vs-expiry race decided by the clock |
 | Architecture | `ArchitectureTest` (ArchUnit) | Controllers do not access repositories; `..api..` not used by service/domain/persistence; no cycles between feature packages |

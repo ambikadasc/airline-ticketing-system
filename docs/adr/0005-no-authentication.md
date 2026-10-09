@@ -43,8 +43,11 @@ booking again.
   that take only the PNR.
 - The bearer-secret model holds only while guessing is slow. With a million stored bookings about
   one random code in a thousand is a real one, so an unthrottled lookup endpoint could find
-  bookings by brute force. Before any public exposure, lookups, confirm and cancel must be
-  throttled per client at the edge or in the service, or the surname check added.
+  bookings by brute force. Therefore unsuccessful lookups are throttled per client in the service:
+  more than 10 `BOOKING_NOT_FOUND` answers in a minute and lookup, confirm and cancel are refused
+  (429) until the minute ends. Only misses count, so customers looking up their own bookings are
+  never affected. The limit is per application instance; a cluster-wide throttle at the edge and
+  the surname check are the stronger steps before public exposure.
 
 ## When to revisit
 - Any deployment beyond a demo: add authentication and role-based access on `/admin`.

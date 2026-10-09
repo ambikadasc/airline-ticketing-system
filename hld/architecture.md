@@ -118,7 +118,11 @@ history is kept and the seats are bookable again at once. Cancelling twice retur
 result both times.
 
 ### 4.6 Lookup and confirmation
-- `GET /bookings/{reference}`: a read-only load by the customer-facing reference.
+- `GET /bookings/{reference}`: a read-only load by the customer-facing reference. Because the
+  reference is the only credential, unsuccessful attempts are throttled per client: more than
+  `airline.lookup-throttle.max-misses` (10) `BOOKING_NOT_FOUND` answers within the window (1 min)
+  and lookup, confirm and cancel answer 429 `RATE_LIMITED` until the window ends. Successful
+  requests never count; nothing else is throttled (ADR 0005).
 - `POST /bookings/{reference}/confirm` (meaningful when the seat hold is on): locks the flight
   like cancellation does, then moves `HELD` → `CONFIRMED` if the hold has not expired. Confirming
   a booking that is already `CONFIRMED` returns it unchanged.
@@ -197,8 +201,40 @@ a connection → search and the health check stall too. Three bounds keep a part
 becoming a total one: a write waits at most 3 s for the lock (`lock_timeout`), a request waits at
 most 2 s for a connection (Hikari `connection-timeout`, not its 30 s default), and the pool size
 is explicit (10). Both waits end in a retryable 503 (`LOCK_TIMEOUT`, `RETRY_LATER`) that changes
-nothing, so clients can back off. Rate limiting, circuit breakers and a separate read pool are not
-built; §11 lists them with their triggers.
+nothing, so clients can back off. Backpressure on booking writes (rate limiting, a circuit
+breaker) and a separate read pool are not built: they can be introduced later as load requires, and
+§11 lists them with their triggers. Spring itself ships neither, so the step is a library, and
+the candidates are known: Resilience4j (Spring Boot starter; `@RateLimiter` and `@CircuitBreaker`
+on the booking service, with `Retry-After` from the same 503 path) or Bucket4j (token buckets per
+key via a servlet filter) inside the service, or Spring Cloud Gateway's `RequestRateLimiter`
+(Redis-backed, cluster-wide) in front of it. The one limit that is built is on guessing, not on
+load: unsuccessful booking lookups are throttled per client (§4.6). It is hand-written because
+those libraries count requests, and this limit counts outcomes (404s) so that customers looking
+up their own bookings are never affected; the library would still need the same interceptor
+around it.
+
+**Connection pool sizing and how it scales.** Ten connections per instance is deliberate, not
+small. A booking transaction holds a connection for a few milliseconds (lock the flight, three or
+four statements, commit), so ten connections serve far more requests per second than a few hundred
+daily schedules generate. Pools should be small: HikariCP's guidance is about `2 × CPU cores` of
+the database host, because more connections than that compete for the same CPU and disk and slow
+every query down. A bigger pool also does nothing for a hot flight, whose writers queue on the row
+lock one at a time whatever the pool size. The real ceiling is PostgreSQL's `max_connections`
+(100 by default), shared by every application instance: `instances × pool` must stay below it.
+The steps, in order, each with the signal that calls for it:
+
+| Step | Signal |
+| --- | --- |
+| Raise `SPRING_DATASOURCE_HIKARI_MAXIMUMPOOLSIZE` (one variable, no code) | 503 `RETRY_LATER` from connection waits while the database CPU is idle |
+| Add application instances (each brings its own pool; correctness lives in the database) | One node's CPU or threads are the limit |
+| Raise `max_connections`, or put PgBouncer between the instances and PostgreSQL | `instances × pool` approaches `max_connections` |
+| A separate read pool or a write bulkhead | Search latency rises during booking spikes |
+| Backpressure on writes (rate limiting, a circuit breaker: Resilience4j or Bucket4j in the service, Spring Cloud Gateway in front), introduced as load requires | A sale saturates the pool faster than the 2 s / 3 s timeouts shed load |
+
+Watch it with Hikari's metrics, which Spring Boot registers automatically:
+`hikaricp.connections.active`, `.pending` (requests waiting for a connection) and `.timeout`
+(waits that gave up), under `/actuator/metrics` once that endpoint is exposed
+(`management.endpoints.web.exposure.include=health,metrics`).
 
 | Alternative | Why not |
 | --- | --- |
@@ -265,6 +301,7 @@ Source: [`diagrams/booking-state.mmd`](diagrams/booking-state.mmd)
 | Input-error status | `400` for all invalid input; `409` for conflicts with resource state | `422` for well-formed but rule-breaking input | Clients branch on `code`; one 4xx for "your input is wrong" keeps the contract simple |
 | Database | PostgreSQL 16, Flyway | MySQL, H2 | Partial indexes, `ON CONFLICT`, transactional DDL; tests run on the same engine via Testcontainers |
 | Authentication | None; admin under `/admin` | Spring Security | Out of scope by the brief; the path split is where role-based access would attach |
+| Guessing protection | Per-client limit on unsuccessful lookups, as a Spring MVC interceptor on the reference endpoints | A servlet filter; a library rate limiter (Resilience4j, Bucket4j); nothing in-app | Counts only misses, so customers are never affected; the libraries count requests, not outcomes, so the same interceptor would still be needed around them; the interceptor matches exactly what Spring routes, so no path variant bypasses it; the body comes from the one error handler |
 | Time | UTC everywhere; injected `Clock` | System time | Deterministic tests; no dependence on host time zone |
 
 ## 10. Assumptions
@@ -332,9 +369,9 @@ Not built; each step is listed with the signal that would justify it.
 | Authentication and role-based access on `/admin` | Any deployment beyond a demo |
 | Cluster-wide lock for the daily job (e.g. ShedLock), so one node runs it | Many nodes each repeating the (idempotent) daily run becomes costly |
 | Distributed tracing (OpenTelemetry via Micrometer Tracing; `traceId` in the log pattern, `traceparent` honoured) | A second service or asynchronous messaging. Today correlation is the `requestId` on every log line (job runs: `job-startup-…`/`job-daily-…`) and in every error response |
-| Rate limiting or a circuit breaker on booking writes (gateway or service) | A sale on one flight saturates the pool faster than the fail-fast timeouts (§6 "Overload") shed load |
+| Backpressure on booking writes: rate limiting and a circuit breaker, introduced as load requires. In the service: Resilience4j (`@RateLimiter`, `@CircuitBreaker` on `BookingService`) or Bucket4j; in front of it: Spring Cloud Gateway `RequestRateLimiter` with Redis for a cluster-wide limit | A sale on one flight saturates the pool faster than the fail-fast timeouts (§6 "Overload") shed load |
 | A separate read pool, or a write bulkhead | Search latency rises during booking spikes |
-| Per-client throttle on booking lookup, confirm and cancel | Public exposure without accounts; the reference is the only credential (ADR 0005) |
+| Cluster-wide lookup throttle at the edge | The in-service throttle on unsuccessful lookups is per instance; many instances multiply a guesser's budget (ADR 0005) |
 | Aircraft-rotation check (same aircraft on overlapping flights, with turnaround time) | Schedules are planned in this system rather than imported from a fleet-planning tool |
 
 ### Multiple airlines
@@ -375,3 +412,4 @@ The brief is single-airline, but no part of the design depends on it.
 | 2026-10-08 | Phase 9: manual top-up endpoint `POST /admin/instance-window/extend` (§5); a booking-reference clash returns 503 `RETRY_LATER` instead of 500; `airline.retry-after` shared by both 503s; job runs log under their own id; tracing and scheduler-lock rows in §11 (LLD §2, §4, §6, §7, §9) |
 | 2026-10-09 | Phase 10 (hardening): cancellation rule inlined (no `CancellationPolicy`); hold queries skipped with the flag off (§8); instances generated one day past the window (§5); startup top-up never aborts boot; V5 composite FK and format CHECKs (data model); PostgreSQL published on 5433 |
 | 2026-10-09 | Phase 11: overload bounds made explicit (connection timeout 2 s, pool size 10; §6 "Overload"); pool exhaustion → 503 `RETRY_LATER`, a dropped connection stays 500; evolution rows for rate limiting, a read pool and a lookup throttle (§11) |
+| 2026-10-09 | Phase 12: unsuccessful booking lookups throttled per client (429 `RATE_LIMITED`, §4.6, §9); write-side backpressure recorded as a later step introduced as load requires (§6, §11) |
