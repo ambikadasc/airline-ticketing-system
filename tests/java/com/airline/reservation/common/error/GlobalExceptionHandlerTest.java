@@ -5,10 +5,12 @@ import java.time.Duration;
 
 import org.hibernate.exception.ConstraintViolationException;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.transaction.CannotCreateTransactionException;
 
 import com.airline.reservation.common.config.AirlineProperties;
 
@@ -60,6 +62,28 @@ class GlobalExceptionHandlerTest {
 		assertThat(response.getStatusCode().value()).isEqualTo(500);
 		assertThat(response.getBody().getProperties()).containsEntry("code", "INTERNAL_ERROR");
 		assertThat(response.getBody().getDetail()).isEqualTo("An unexpected error occurred");
+	}
+
+	@Test
+	void anExhaustedConnectionPoolIsATemporaryConditionToRetry() {
+		ResponseEntity<ProblemDetail> response = handler.handlePoolExhausted(
+				new CannotCreateTransactionException("Could not open JPA EntityManager for transaction"), request);
+
+		assertThat(response.getStatusCode().value()).isEqualTo(503);
+		assertThat(response.getHeaders().getFirst("Retry-After")).isEqualTo("1");
+		assertThat(response.getBody().getProperties()).containsEntry("code", "RETRY_LATER");
+		assertThat(response.getBody().getDetail()).contains("nothing was changed");
+	}
+
+	@Test
+	void aConnectionLostMidTransactionIsNotCalledSafeToRetry() {
+		// The outcome is unknown (the commit may have gone through), so it is a 500, never "retry".
+		ResponseEntity<ProblemDetail> response = handler.handleUnexpected(
+				new DataAccessResourceFailureException("connection reset"), request);
+
+		assertThat(response.getStatusCode().value()).isEqualTo(500);
+		assertThat(response.getBody().getProperties()).containsEntry("code", "INTERNAL_ERROR");
+		assertThat(response.getBody().getDetail()).doesNotContain("retry", "Retry");
 	}
 
 	@Test

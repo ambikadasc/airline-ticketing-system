@@ -191,6 +191,15 @@ second cancellation waits, then sees `CANCELLED` and returns it unchanged. Locki
 first on every path also keeps a single lock order, so cancellation cannot deadlock with
 booking or hold expiry.
 
+**Overload.** The failure chain under a storm on one flight is: writers wait for that flight's
+lock while holding a pooled connection → the pool fills → every request thread parks waiting for
+a connection → search and the health check stall too. Three bounds keep a partial slowdown from
+becoming a total one: a write waits at most 3 s for the lock (`lock_timeout`), a request waits at
+most 2 s for a connection (Hikari `connection-timeout`, not its 30 s default), and the pool size
+is explicit (10). Both waits end in a retryable 503 (`LOCK_TIMEOUT`, `RETRY_LATER`) that changes
+nothing, so clients can back off. Rate limiting, circuit breakers and a separate read pool are not
+built; §11 lists them with their triggers.
+
 | Alternative | Why not |
 | --- | --- |
 | Optimistic locking (`@Version` on the instance or booking) | Popular flights are high-contention writes; optimistic versions turn contention into failed requests and client retries. The row lock is held for milliseconds |
@@ -323,6 +332,9 @@ Not built; each step is listed with the signal that would justify it.
 | Authentication and role-based access on `/admin` | Any deployment beyond a demo |
 | Cluster-wide lock for the daily job (e.g. ShedLock), so one node runs it | Many nodes each repeating the (idempotent) daily run becomes costly |
 | Distributed tracing (OpenTelemetry via Micrometer Tracing; `traceId` in the log pattern, `traceparent` honoured) | A second service or asynchronous messaging. Today correlation is the `requestId` on every log line (job runs: `job-startup-…`/`job-daily-…`) and in every error response |
+| Rate limiting or a circuit breaker on booking writes (gateway or service) | A sale on one flight saturates the pool faster than the fail-fast timeouts (§6 "Overload") shed load |
+| A separate read pool, or a write bulkhead | Search latency rises during booking spikes |
+| Per-client throttle on booking lookup, confirm and cancel | Public exposure without accounts; the reference is the only credential (ADR 0005) |
 | Aircraft-rotation check (same aircraft on overlapping flights, with turnaround time) | Schedules are planned in this system rather than imported from a fleet-planning tool |
 
 ### Multiple airlines
@@ -362,3 +374,4 @@ The brief is single-airline, but no part of the design depends on it.
 | 2026-10-08 | Phase 8: documentation finished: links to README and ADRs; multiple-airlines and aircraft-rotation notes in §11; LLD aligned with the final code |
 | 2026-10-08 | Phase 9: manual top-up endpoint `POST /admin/instance-window/extend` (§5); a booking-reference clash returns 503 `RETRY_LATER` instead of 500; `airline.retry-after` shared by both 503s; job runs log under their own id; tracing and scheduler-lock rows in §11 (LLD §2, §4, §6, §7, §9) |
 | 2026-10-09 | Phase 10 (hardening): cancellation rule inlined (no `CancellationPolicy`); hold queries skipped with the flag off (§8); instances generated one day past the window (§5); startup top-up never aborts boot; V5 composite FK and format CHECKs (data model); PostgreSQL published on 5433 |
+| 2026-10-09 | Phase 11: overload bounds made explicit (connection timeout 2 s, pool size 10; §6 "Overload"); pool exhaustion → 503 `RETRY_LATER`, a dropped connection stays 500; evolution rows for rate limiting, a read pool and a lookup throttle (§11) |

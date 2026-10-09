@@ -27,7 +27,7 @@ Docker Compose
 
 ### Build
 ```bash
-./mvnw verify          # compiles and runs all 312 tests against a real PostgreSQL (needs Docker)
+./mvnw verify          # compiles and runs all 315 tests against a real PostgreSQL (needs Docker)
 ```
 
 ### Run
@@ -67,7 +67,9 @@ Boot maps `AIRLINE_BOOKING_WINDOW_DAYS` to `airline.booking-window-days`):
 | `airline.retry-after` | `AIRLINE_RETRY_AFTER` | `PT1S` | `Retry-After` sent with a 503 (`LOCK_TIMEOUT`, `RETRY_LATER`) |
 | `airline.seat-hold.enabled` | `AIRLINE_SEAT_HOLD_ENABLED` | `false` | Optional seat hold |
 | `airline.seat-hold.ttl` | `AIRLINE_SEAT_HOLD_TTL` | `PT10M` | How long a hold lasts |
-| `spring.datasource.hikari.connection-init-sql` | `SPRING_DATASOURCE_HIKARI_CONNECTIONINITSQL` | `SET lock_timeout = '3s'` | How long a booking waits for a flight lock |
+| `spring.datasource.hikari.connection-init-sql` | `SPRING_DATASOURCE_HIKARI_CONNECTIONINITSQL` | `SET lock_timeout = '3s'` | How long a write waits for a flight lock (while holding a connection) |
+| `spring.datasource.hikari.connection-timeout` | `SPRING_DATASOURCE_HIKARI_CONNECTIONTIMEOUT` | `2000` (ms) | How long a request waits for a pooled connection before 503 `RETRY_LATER` |
+| `spring.datasource.hikari.maximum-pool-size` | `SPRING_DATASOURCE_HIKARI_MAXIMUMPOOLSIZE` | `10` | Database connections per application instance |
 
 With Docker Compose, set any of the `AIRLINE_*` variables in your shell or in a `.env` file next to
 `docker-compose.yml`; Compose passes them through, and unset ones keep the default:
@@ -160,8 +162,9 @@ stack traces, SQL, or class or constraint names.
 ```
 Status policy: 400 for invalid input, 404 for unknown ids, 409 for conflicts with the current
 state, 503 with `Retry-After` for temporary conditions where nothing was changed: `LOCK_TIMEOUT`
-under extreme contention, `RETRY_LATER` when two bookings happen to draw the same reference at the
-same instant. Full catalogue:
+under extreme contention, `RETRY_LATER` when the connection pool is exhausted or two bookings
+happen to draw the same reference at the same instant. Clients retrying a 503 should add random
+jitter to `Retry-After` and cap the number of retries, so they don't all come back together. Full catalogue:
 [LLD §6](lld/design.md#6-error-handling).
 
 ---
@@ -404,6 +407,9 @@ None of this is built. Each step is paired with the signal that would justify it
 | Aircraft-rotation check (same aircraft on overlapping flights, with turnaround time) | Schedules are planned in this system rather than imported from a fleet-planning tool |
 | Cluster-wide lock for the daily job (e.g. ShedLock), so one node runs it | Many nodes each repeating the (idempotent) daily run becomes costly |
 | Distributed tracing (OpenTelemetry via Micrometer Tracing; `traceId` in the log pattern, `traceparent` honoured) | A second service or asynchronous messaging appears. Today a single service is correlated by `requestId`: on every log line (job runs use `job-startup-…`/`job-daily-…`) and in every error response |
+| Rate limiting or a circuit breaker on booking writes (at the gateway, or in the service) | A sale on one flight saturates the connection pool faster than the fail-fast timeouts shed load. Today: lock waits ≤ 3 s, connection waits ≤ 2 s, both answered with a retryable 503 |
+| A separate read pool, or a write bulkhead, so search never waits behind bookings | Search latency rises during booking spikes |
+| Per-client throttle on booking lookup, confirm and cancel | Public exposure without accounts: the reference is the only credential, so guessing must stay slow (see ADR 0005) |
 
 ### Multiple airlines
 The brief is single-airline, but the design does not depend on that.
@@ -431,7 +437,7 @@ coordination outside this system), and aircraft-rotation clashes (see the table 
 
 ## Testing approach
 
-312 tests, all run by `./mvnw verify`. Integration tests use PostgreSQL 16 in Testcontainers with
+315 tests, all run by `./mvnw verify`. Integration tests use PostgreSQL 16 in Testcontainers with
 the real Flyway migrations. No H2, and no test runs inside a test transaction.
 
 | Kind | What it proves | Classes |
@@ -439,7 +445,7 @@ the real Flyway migrations. No H2, and no test runs inside a test transaction.
 | Unit, test-first | Seat layout (labels, order, validity); instance generation (operating days only, both window ends, leap day, overnight); booking status transitions (full table); booking and hold behaviour; validators; reference format | `SeatLayoutTest`, `FlightInstanceGeneratorTest`, `FlightScheduleTest`, `BookingStatusTest`, `BookingTest`, `BookingHoldTest`, `FlightInstanceTest`, `BookingRequestValidatorTest`, `PnrGeneratorTest`, policy tests |
 | API (MockMvc + real DB) | Every endpoint's happy path; every response field; booking is all or nothing; cancel then rebook; idempotent cancel; window top-up idempotent and gap-filling (job and endpoint) | `ScheduleApiTest`, `FlightSearchApiTest`, `SeatMapApiTest`, `BookingApiTest`, `BookingCancellationApiTest`, `InstanceWindowJobTest`, `InstanceWindowApiTest` |
 | Concurrency | Exactly one winner for one seat (50 threads); no partial overlap; concurrent cancels release once; cancel-vs-book stays consistent; inventory invariant after every scenario; duplicate-number race gives no 500 | `BookingConcurrencyTest`, `CancellationConcurrencyTest`, `DuplicateFlightNumberRaceTest` |
-| Error contract | All 21 reachable error codes have the same shape and leak nothing; lock timeout → 503; a booking-reference clash → 503 `RETRY_LATER`, nothing stored; request ids; job-run ids | `ErrorContractTest`, `LockTimeoutTest`, `BookingReferenceClashTest`, `RequestIdFilterTest`, `GlobalExceptionHandlerTest`, `InstanceWindowJobLogIdTest` |
+| Error contract | All 21 reachable error codes have the same shape and leak nothing; lock timeout → 503; pool exhaustion → 503 within the connection timeout; a booking-reference clash → 503 `RETRY_LATER`, nothing stored; request ids; job-run ids | `ErrorContractTest`, `LockTimeoutTest`, `PoolExhaustionTest`, `BookingReferenceClashTest`, `RequestIdFilterTest`, `GlobalExceptionHandlerTest`, `InstanceWindowJobLogIdTest` |
 | Seat hold on | Hold → confirm; expiry frees seats; confirm-vs-expiry race (the clock decides the single winner) | `SeatHoldTest` |
 | Edge cases, configuration, schema | Last day of the window, overnight, created late in the day, last free seat, more seats than remain; a 30-day window applied by configuration to generation, search and booking; database-carried rules (seat row must match its booking's flight, seat and flight-number formats) | `EdgeCasesTest`, `BookingWindowConfigTest`, `SchemaIntegrityTest` |
 | Architecture | Controllers never reach repositories; nothing depends on the API layer; no package cycles | `ArchitectureTest` |

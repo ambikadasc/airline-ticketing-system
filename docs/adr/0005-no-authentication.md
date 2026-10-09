@@ -41,6 +41,10 @@ booking again.
   not be deployed like that.
 - Anyone holding a reference can cancel that booking, as with many airline "manage booking" pages
   that take only the PNR.
+- The bearer-secret model holds only while guessing is slow. With a million stored bookings about
+  one random code in a thousand is a real one, so an unthrottled lookup endpoint could find
+  bookings by brute force. Before any public exposure, lookups, confirm and cancel must be
+  throttled per client at the edge or in the service, or the surname check added.
 
 ## When to revisit
 - Any deployment beyond a demo: add authentication and role-based access on `/admin`.

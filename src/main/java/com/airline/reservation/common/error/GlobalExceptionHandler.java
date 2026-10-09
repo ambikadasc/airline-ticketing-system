@@ -11,6 +11,7 @@ import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.PessimisticLockingFailureException;
+import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ProblemDetail;
@@ -103,6 +104,22 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 		String detail = "The flight is busy with other requests; please retry";
 		logWarning(request, ErrorCode.LOCK_TIMEOUT, detail);
 		return retryLater(ErrorCode.LOCK_TIMEOUT, detail);
+	}
+
+	/**
+	 * No database connection could be obtained within the pool's connection-timeout, so the
+	 * transaction never started and nothing was changed: the client may retry.
+	 * <p>
+	 * A connection that breaks later ({@code DataAccessResourceFailureException}) is deliberately
+	 * not mapped here: if it breaks during the commit the booking may have been stored, so
+	 * promising "nothing was changed" could lead a client to book twice. It stays a 500.
+	 */
+	@ExceptionHandler(CannotCreateTransactionException.class)
+	ResponseEntity<ProblemDetail> handlePoolExhausted(CannotCreateTransactionException ex,
+			HttpServletRequest request) {
+		String detail = "The service is busy; nothing was changed. Please retry";
+		logWarning(request, ErrorCode.RETRY_LATER, detail);
+		return retryLater(ErrorCode.RETRY_LATER, detail);
 	}
 
 	/** A 503 with Retry-After (airline.retry-after): a temporary condition, nothing was changed. */

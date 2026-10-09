@@ -11,8 +11,14 @@ spring:
     username: airline
     password: airline
     hikari:
-      # A request that cannot get a flight lock within 3s fails fast (mapped to 503 LOCK_TIMEOUT).
+      # Three numbers that bound how long a request can hold or wait for a database connection:
+      #  - a write waits at most 3 s for a flight lock (while holding its connection)      -> 503 LOCK_TIMEOUT
+      #  - a request waits at most 2 s for a pooled connection (never the 30 s default)    -> 503 RETRY_LATER
+      #  - 10 connections in the pool (the default, made explicit)
+      # Together they stop one busy flight from parking every request thread behind the pool.
       connection-init-sql: SET lock_timeout = '3s'
+      connection-timeout: 2000
+      maximum-pool-size: 10
   jpa:
     open-in-view: false
     hibernate:

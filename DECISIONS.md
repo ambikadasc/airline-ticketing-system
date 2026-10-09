@@ -49,11 +49,14 @@ ones, with the alternatives that were rejected, is in `hld/architecture.md` (sec
 - 4xx and 503 are logged at WARN on one line; other 5xx at ERROR with the stack trace; passenger names are never logged.
 - `X-Request-Id` is accepted only if it matches `^[A-Za-z0-9._-]{1,64}$`, otherwise a UUID is generated; the id is on every log line and in every error body.
 - Distributed tracing is not built (one service, one database); it is a documented scaling step.
+- Pool exhaustion (`CannotCreateTransactionException`: no connection obtained, nothing started) → 503 `RETRY_LATER`; a connection lost mid-transaction stays a 500 because the outcome is unknown and a "retry" promise could cause a double booking.
+- Rate limiting and circuit breakers are not built (not asked for by the brief; the fail-fast timeouts bound the overload chain); they are documented scaling steps with triggers.
 
 ## Configuration
 - All business settings are `airline.*` properties, overridable by environment variable (`AIRLINE_BOOKING_WINDOW_DAYS` etc.) and passed through by Compose when set; `airline.retry-after` serves both 503s.
 - Format rules (seat, flight number, reference) stay in code and in database CHECKs because changing them needs a migration.
 - PostgreSQL is published on `127.0.0.1:5433` by Compose so a local PostgreSQL on 5432 does not clash; the application's default URL matches.
+- The pool is explicit (10 connections) and a request waits at most 2 s for one (not Hikari's 30 s default), so a busy flight cannot park every request thread behind the pool; with `lock_timeout = 3s` these are the three bounds on overload.
 
 ## Data model and database
 - PostgreSQL 16, Flyway (forward-only V1–V5; seed data in V4), Hibernate validates only; tests run on the same engine (ADR 0006).
