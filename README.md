@@ -114,6 +114,29 @@ bash scripts/smoke-test.sh
 The script needs only bash and curl. It runs the whole scenario and prints PASS or FAIL per
 step: create a schedule, search, seat map, book, a seat conflict, cancel twice, rebook.
 
+### Load test
+A JMeter run against a **separate, throwaway** stack, seeded by SQL to a chosen size. The
+working stack and its database are never touched, and the throwaway stack is removed at the end:
+```bash
+bash scripts/load-test.sh                 # 100 schedules, 36,500 flights, ~1M bookings, 60 s
+SCHEDULES=10 bash scripts/load-test.sh    # the ~100k-booking baseline
+```
+Needs bash, curl and Docker only: JMeter runs from the `alpine/jmeter` image, nothing is
+installed. The script brings up Compose project `airline-load` (same image, app on
+`127.0.0.1:8081`, database not published), runs `load/seed.sql` (schedules on every route, a
+year of flights, `FILL` = 30 % of every flight's seats already booked, every tenth booking
+cancelled), runs `load/airline-load.jmx` for `DURATION` seconds with four scenarios (search,
+lookup by reference, bookings spread over all flights, bookings on one hot flight; thread counts
+`SEARCH` `LOOKUP` `BOOKING` `HOT`, default 20/10/10/20), prints requests/s and p50/p95/p99 per
+scenario with the response codes, checks the inventory invariant on every flight, and ends with
+`down -v` (`KEEP=1` leaves the stack up). JMeter's HTML report is in
+`load/results/report/index.html` (git-ignored). The figures are under
+[Measured](#measured).
+
+JMeter is the widely used standard, has a ready HTML report and needs no code; the code-first
+alternatives are k6 (JavaScript) and Gatling (Java/Scala), whose scripts read better in version
+control than a `.jmx` file.
+
 ---
 
 ## API
@@ -161,6 +184,23 @@ curl -s -X POST localhost:8080/api/v1/bookings -H 'Content-Type: application/jso
 curl -s -X POST localhost:8080/api/v1/bookings/K7M2QX/cancel
 ```
 Replace `42` and `K7M2QX` with the values from your responses.
+
+### Demo walkthrough (Swagger UI)
+The same story clicked through http://localhost:8080/swagger-ui.html ("Try it out" on each
+operation) on a fresh stack (`docker compose down -v && docker compose up --build -d`). Each
+step names the design point it shows.
+
+| # | Operation | Input | What to see | What it shows |
+| --- | --- | --- | --- | --- |
+| 1 | `POST /api/v1/admin/schedules` | the XY101 body from the curl walkthrough | 201, `generatedInstances` ≈ 158 | Flights are materialised on creation: one row per operating date to the end of the booking window |
+| 2 | `GET /api/v1/flights` | `origin` DXB, `destination` LHR, `date` = a Monday within the next year | 200, one flight, `availableSeats` 180 | Search reads one indexed table and a maintained counter, no counting |
+| 3 | `GET /api/v1/flights/{flightInstanceId}/seats` | the id from step 2 | 180 seats, all `AVAILABLE` | Seat map = aircraft layout minus taken seats; two states only |
+| 4 | `POST /api/v1/bookings` | `{"flightInstanceId": <id>, "passengers": [{"name": "Ayesha Khan", "seatNumber": "12A"}, {"name": "Bilal Khan", "seatNumber": "12B"}]}` | 201, `bookingReference`, `status` `CONFIRMED` | Seats taken under the flight's row lock; a random 6-character reference |
+| 5 | step 4 again, same body | | 409 `SEAT_UNAVAILABLE`, `unavailableSeats` `["12A","12B"]` | All or nothing, and the error names the seats |
+| 6 | `GET /api/v1/bookings/{reference}` | the reference from step 4 | 200 with both passengers | Lookup by reference only (ADR 0005) |
+| 7 | `POST /api/v1/bookings/{reference}/cancel`, twice | | 200 `CANCELLED` both times; step 3 shows 12A/12B `AVAILABLE` again | Idempotent cancellation; seats released at once |
+| 8 | `GET /api/v1/bookings/ZZZZZZ`, eleven times | | ten 404 `BOOKING_NOT_FOUND`, then 429 `RATE_LIMITED` with `Retry-After` | Guessing references is throttled; successful lookups never count |
+| 9 (optional) | restart with `AIRLINE_SEAT_HOLD_ENABLED=true` (see Run), repeat step 4, then `POST .../{reference}/confirm` | | 201 `HELD`, then 200 `CONFIRMED` | The seat hold is a flag and a Strategy, off by default (ADR 0003) |
 
 ### Errors
 Every error is an RFC 9457 problem (`application/problem+json`) with a machine-readable `code`
@@ -430,6 +470,35 @@ None of this is built. Each step is paired with the signal that would justify it
 | A separate read pool, or a write bulkhead, so search never waits behind bookings | Search latency rises during booking spikes |
 | Cluster-wide lookup throttle at the edge (gateway or load balancer) | The in-service throttle on unsuccessful lookups is per instance, so many instances multiply a guesser's budget (ADR 0005) |
 
+### Measured
+`scripts/load-test.sh` (see [Load test](#load-test)) on one laptop (Windows 11, Docker Desktop,
+24 logical cores; application, PostgreSQL and JMeter each in a container on the same machine),
+60 threads for 60 s against the default pool of 10, first with ~100k bookings in the database and
+then with ~1M (36,500 flights, 985,500 bookings, 1,971,000 seat rows). Times are elapsed
+milliseconds as JMeter saw them.
+
+| Scenario (threads) | Bookings in DB | req/s | p50 | p95 | p99 | max | Responses |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Search by route and date (20) | 100k | 800 | 21 | 41 | 64 | 179 | all 200 |
+| | 1M | 881 | 20 | 42 | 67 | 267 | all 200 |
+| Lookup by reference (10) | 100k | 425 | 20 | 41 | 63 | 186 | all 200 |
+| | 1M | 458 | 20 | 42 | 64 | 233 | all 200 |
+| Booking, random flight and seat (10) | 100k | 402 | 23 | 44 | 70 | 336 | 72 % 201, 28 % 409 `SEAT_UNAVAILABLE` (seat already taken) |
+| | 1M | 402 | 23 | 45 | 71 | 413 | 73 % 201, 27 % 409 |
+| Booking, one hot flight (20) | 100k | 644 | 28 | 51 | 83 | 362 | 132 × 201 (every free seat sold), then 409 |
+| | 1M | 641 | 28 | 52 | 87 | 468 | 132 × 201, then 409 |
+
+About 2,300 requests/s in total, no 5xx, no `LOCK_TIMEOUT`, no pool-wait timeout
+(`hikaricp.connections.timeout` 0; slowest connection acquire 0.26 s), and the inventory
+invariant held on all 36,500 flights afterwards. What to read from it:
+- Ten times the data changes nothing: every hot query is an index lookup
+  ([LLD §11](lld/design.md#11-query-plans-at-scale)), so latency depends on concurrency, not
+  on table size.
+- The hot flight, where 20 writers queue on one row lock, still answers in 28 ms at p50: the
+  lock is held for a few milliseconds per booking, so the queue drains faster than it fills.
+- These are relative numbers: client, application and database shared one machine, so they
+  show the shape (flat with data, bounded under contention), not the capacity of a deployment.
+
 ### Multiple airlines
 The brief is single-airline, but the design does not depend on that.
 
@@ -473,6 +542,9 @@ The single-seat race test was first run **without** the lock and the unique inde
 bookings succeeded), then with them (exactly 1). The concurrency classes passed 5 runs in a row,
 and the full build passed 3 clean runs in a row.
 
+Load and data-growth behaviour is measured rather than unit-tested: [Load test](#load-test) and
+[Measured](#measured).
+
 ---
 
 ## Repository layout
@@ -486,7 +558,9 @@ and the full build passed 3 clean runs in a row.
 ├── src/main/resources/       application.yml
 ├── db/                       schema.sql (commented snapshot), migrations/ (Flyway V1–V4)
 ├── tests/                    java/ (all tests)
+├── load/                     load test: seed.sql, airline-load.jmx (JMeter), Compose override for the throwaway stack
 ├── scripts/smoke-test.sh     end-to-end check against a running stack
+├── scripts/load-test.sh      seeded JMeter run on a throwaway stack, removed afterwards
 ├── DECISIONS.md              one-line log of every decision, by phase
 ├── Dockerfile, docker-compose.yml
 └── pom.xml, mvnw, .mvn/      Maven build (wrapper)

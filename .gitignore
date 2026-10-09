@@ -31,3 +31,6 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Load-test output (scripts/load-test.sh)
+load/results/

@@ -236,6 +236,17 @@ Watch it with Hikari's metrics, which Spring Boot registers automatically:
 (waits that gave up), under `/actuator/metrics` once that endpoint is exposed
 (`management.endpoints.web.exposure.include=health,metrics`).
 
+**Measured.** `scripts/load-test.sh` runs JMeter against a throwaway copy of the stack (a
+separate Compose project, seeded by SQL, removed afterwards; the README's "Load test" and
+"Measured" sections have the procedure and the full table). On one laptop, 60 threads for 60 s
+(20 search, 10 lookup, 10 bookings across all flights, 20 bookings on one flight) against the
+pool of 10: about 2,300 requests/s in total, p95 ≤ 52 ms in every scenario, no 5xx, no
+`LOCK_TIMEOUT`, no pool-wait timeout, and the same figures with 100k and with 1M bookings in the
+database, because the hot queries are index lookups (query plans in LLD §11). The hot flight, where
+all 20 writers queue on one row lock, answers in 28 ms at p50: the lock is held for milliseconds
+per booking. Relative numbers (client, application and database on one machine), useful for the
+shape, not for capacity planning.
+
 | Alternative | Why not |
 | --- | --- |
 | Optimistic locking (`@Version` on the instance or booking) | Popular flights are high-contention writes; optimistic versions turn contention into failed requests and client retries. The row lock is held for milliseconds |
@@ -413,3 +424,4 @@ The brief is single-airline, but no part of the design depends on it.
 | 2026-10-09 | Phase 10 (hardening): cancellation rule inlined (no `CancellationPolicy`); hold queries skipped with the flag off (§8); instances generated one day past the window (§5); startup top-up never aborts boot; V5 composite FK and format CHECKs (data model); PostgreSQL published on 5433 |
 | 2026-10-09 | Phase 11: overload bounds made explicit (connection timeout 2 s, pool size 10; §6 "Overload"); pool exhaustion → 503 `RETRY_LATER`, a dropped connection stays 500; evolution rows for rate limiting, a read pool and a lookup throttle (§11) |
 | 2026-10-09 | Phase 12: unsuccessful booking lookups throttled per client (429 `RATE_LIMITED`, §4.6, §9); write-side backpressure recorded as a later step introduced as load requires (§6, §11) |
+| 2026-10-09 | Phase 13: load test on a throwaway stack (JMeter, SQL seed) and the measured figures (§6); query plans at 1M bookings (LLD §11); Swagger demo walkthrough (README) |

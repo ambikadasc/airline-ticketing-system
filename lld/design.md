@@ -464,3 +464,23 @@ on tests (they must see committed data).
 | Concurrency | `BookingConcurrencyTest`, `CancellationConcurrencyTest`, `DuplicateFlightNumberRaceTest` (helpers in `ConcurrencySupport`) | 50 threads on one seat → exactly 1 success; 50 seats; overlapping 1A+1B vs 1B+1C; 10 concurrent cancels; cancel vs book; duplicate flight number never 500. After each: counter invariant and no seat taken twice. Shown to fail with the lock and index removed (10 of 50 succeeded) |
 | Seat hold on | `SeatHoldTest` (own context, `airline.seat-hold.enabled=true`) | Hold → confirm; expiry frees seats for the next customer; confirm after expiry → 409; confirm-vs-expiry race decided by the clock |
 | Architecture | `ArchitectureTest` (ArchUnit) | Controllers do not access repositories; `..api..` not used by service/domain/persistence; no cycles between feature packages |
+| Load (a tool, not a test) | `scripts/load-test.sh`, `load/seed.sql`, `load/airline-load.jmx` | Seeded JMeter run on a separate throwaway stack: throughput and percentiles per scenario, response codes, inventory invariant after the run (README "Load test" and "Measured") |
+
+## 11. Query plans at scale
+
+Captured with `EXPLAIN (ANALYZE, BUFFERS)` on the load-test database (`scripts/load-test.sh`
+defaults: 36,500 flight instances, 985,500 bookings, 1,971,000 seat rows; `booking` 177 MB,
+`booking_seat` 330 MB). Each hot query is an index lookup, so its cost does not grow with the
+tables:
+
+| Query | Plan | Rows | Execution |
+| --- | --- | --- | --- |
+| Search by route and date (`FlightInstanceRepository.search`) | Index Scan using `idx_instance_search` (`origin_code`, `destination_code`, `flight_date`), filter `departure_at > now()`, sort by `departure_at` | 1 | 0.07 ms, 6 buffers |
+| Lookup by reference (`BookingRepository.findWithSeatsByReference`, the `booking` side) | Index Scan using `uq_booking_reference` | 1 | 0.03 ms, 4 buffers |
+| Taken seats on one flight (`SeatOccupancyQueries`: seat map, availability check) | Bitmap Index Scan on `uq_active_seat` (`flight_instance_id = ?`; the partial index holds only ACTIVE/HELD rows), then one index lookup per seat on `booking` via `uq_booking_id_instance` for the hold-expiry condition | 180 (a full flight) | 0.44 ms, 746 buffers |
+
+The seat query is the most expensive: on a flight with every seat taken it touches one `booking`
+row per seat for the hold-expiry test, and still runs in under half a millisecond. Had the
+partial index not matched (`status IN ('ACTIVE','HELD')` must appear literally in the query), the
+plan would be a scan of `idx_booking_seat_booking` or of the table; the predicate is kept in one
+place (`SeatOccupancyQueries`) for that reason.
