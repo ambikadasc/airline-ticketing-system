@@ -18,7 +18,10 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-/** The manual trigger for instance generation. Today (the test clock) is 2026-01-05; the window ends 2027-01-05. */
+/**
+ * The manual trigger for instance generation. Today (the test clock) is 2026-01-05; the bookable
+ * window ends 2027-01-05 and instances are generated one day further (367 for a daily schedule).
+ */
 class InstanceWindowApiTest extends IntegrationTest {
 
 	@Autowired
@@ -27,14 +30,14 @@ class InstanceWindowApiTest extends IntegrationTest {
 	@Test
 	void fillsMissingDatesAndReportsHowFarTheWindowReaches() throws Exception {
 		createDailySchedule();
-		jdbcTemplate.update("DELETE FROM flight_instance WHERE flight_date > DATE '2026-12-26'");
-		assertThat(instanceCount()).isEqualTo(356);
+		jdbcTemplate.update("DELETE FROM flight_instance WHERE flight_date > DATE '2026-12-27'");
+		assertThat(instanceCount()).isEqualTo(357);
 
 		extend()
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.inserted").value(10))
 				.andExpect(jsonPath("$.windowEnd").value("2027-01-05"));
-		assertThat(instanceCount()).isEqualTo(366);
+		assertThat(instanceCount()).isEqualTo(367);
 	}
 
 	@Test
@@ -43,7 +46,7 @@ class InstanceWindowApiTest extends IntegrationTest {
 
 		extend().andExpect(status().isOk()).andExpect(jsonPath("$.inserted").value(0));
 		extend().andExpect(status().isOk()).andExpect(jsonPath("$.inserted").value(0));
-		assertThat(instanceCount()).isEqualTo(366);
+		assertThat(instanceCount()).isEqualTo(367);
 	}
 
 	@Test

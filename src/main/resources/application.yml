@@ -5,8 +5,9 @@ spring:
   application:
     name: airline-reservation
   datasource:
-    # Docker Compose overrides this with SPRING_DATASOURCE_URL.
-    url: jdbc:postgresql://localhost:5432/airline
+    # The port docker-compose.yml publishes for the db service (not 5432, to avoid clashing with a
+    # local PostgreSQL). Inside Compose the app gets SPRING_DATASOURCE_URL instead.
+    url: jdbc:postgresql://localhost:5433/airline
     username: airline
     password: airline
     hikari:

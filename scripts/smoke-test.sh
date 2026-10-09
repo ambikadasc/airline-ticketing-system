@@ -29,9 +29,9 @@ request() {
 }
 
 # field NAME: the first value of "NAME" in $BODY (strings without quotes).
+# Extended regex (-E) so the alternation works with GNU, BSD (macOS) and busybox sed alike.
 field() {
-  printf '%s' "$BODY" | sed -n "s/^[^\"]*\"$1\":\(\"[^\"]*\"\|[^,}]*\).*/\1/p; s/.*[,{]\"$1\":\(\"[^\"]*\"\|[^,}]*\).*/\1/p" \
-    | head -1 | tr -d '"'
+  printf '%s' "$BODY" | sed -E -n 's/.*"'"$1"'":("[^"]*"|[^,}]*).*/\1/p' | head -1 | tr -d '"'
 }
 
 # seat_status SEAT: AVAILABLE or BOOKED for one seat in a seat-map $BODY.
@@ -62,9 +62,11 @@ book() {
   request POST /bookings "{\"flightInstanceId\":$FLIGHT_ID,\"passengers\":[$passengers]}"
 }
 
-# The next Monday at least one day ahead (GNU date on Linux and Git Bash, BSD date on macOS).
+# The next Monday at least one day ahead. Date arithmetic is done on epoch seconds so it works with
+# GNU date (Linux, Git Bash), BSD date (macOS, -r) and busybox date (-d @epoch) alike.
 DAYS_AHEAD=$(( 8 - $(date -u +%u) ))
-DATE=$(date -u -d "+$DAYS_AHEAD days" +%F 2>/dev/null || date -u -v+"${DAYS_AHEAD}"d +%F)
+TARGET_EPOCH=$(( $(date -u +%s) + DAYS_AHEAD * 86400 ))
+DATE=$(date -u -d "@$TARGET_EPOCH" +%F 2>/dev/null || date -u -r "$TARGET_EPOCH" +%F)
 echo "Smoke test against $BASE_URL, flight date $DATE"
 
 # --- the scenario ----------------------------------------------------------------------------

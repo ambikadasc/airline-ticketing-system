@@ -3,7 +3,6 @@ sequenceDiagram
     participant C as Client
     participant API as BookingController
     participant S as BookingService
-    participant P as CancellationPolicy
     participant DB as PostgreSQL
 
     C->>API: POST /api/v1/bookings/{reference}/cancel
@@ -22,9 +21,7 @@ sequenceDiagram
         S->>DB: COMMIT (nothing changed)
         API-->>C: 200 current state (idempotent)
     else CONFIRMED or HELD
-        S->>P: verifyCancellable(booking, flight, now)
-        alt policy refuses (today: flight departed)
-            P-->>S: BookingNotCancellableException
+        alt flight already departed
             S->>DB: ROLLBACK
             API-->>C: 409 BOOKING_NOT_CANCELLABLE
         end

@@ -90,19 +90,11 @@ class FlightSearchApiTest extends IntegrationTest {
 	}
 
 	@Test
-	void countsSeatsOnExpiredHoldsAsAvailable() throws Exception {
+	void withTheSeatHoldOffSearchReadsTheCounterAlone() throws Exception {
+		// With the flag off no hold query runs (the hold-aware count is covered in SeatHoldTest).
 		long flightId = flightIdOn(TODAY);
 		jdbcTemplate.update("UPDATE flight_instance SET available_seats = 178 WHERE id = ?", flightId);
 		bookingRows.insert(flightId, "HELD", Instant.parse("2026-01-04T23:50:00Z"), "HELD", "1A", "1B");
-
-		search("DXB", "LHR", TODAY).andExpect(jsonPath("$[0].availableSeats").value(180));
-	}
-
-	@Test
-	void doesNotCountSeatsOnLiveHolds() throws Exception {
-		long flightId = flightIdOn(TODAY);
-		jdbcTemplate.update("UPDATE flight_instance SET available_seats = 178 WHERE id = ?", flightId);
-		bookingRows.insert(flightId, "HELD", Instant.parse("2026-01-05T00:10:00Z"), "HELD", "1A", "1B");
 
 		search("DXB", "LHR", TODAY).andExpect(jsonPath("$[0].availableSeats").value(178));
 	}

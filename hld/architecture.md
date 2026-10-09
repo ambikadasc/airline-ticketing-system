@@ -45,7 +45,7 @@ Source: [`diagrams/architecture.mmd`](diagrams/architecture.mmd)
 | `aircraft` | `Aircraft`, `SeatLayout`, repository | Seeded aircraft with a fixed seat configuration (rows × seat letters) |
 | `schedule` | `AdminScheduleController`, `ScheduleService`, `FlightSchedule`, `FlightInstanceGenerator`, `InstanceWindowJob` | Back-office creation and lookup of schedules (templates); turning schedules into flight instances |
 | `flight` | `FlightController`, `FlightSearchService`, `SeatMapService`, `FlightInstance`, `FlightInstanceBulkWriter` | Materialised flight instances, search and seat map |
-| `booking` | `BookingController`, `BookingService`, `BookingPolicy` (+2 implementations), `CancellationPolicy` (+1 implementation), `BookingRequestValidator`, `PnrGenerator`, `Booking`, `BookingSeat` | Booking, lookup, confirmation, cancellation |
+| `booking` | `BookingController`, `BookingService`, `BookingPolicy` (+2 implementations), `BookingRequestValidator`, `PnrGenerator`, `Booking`, `BookingSeat` | Booking, lookup, confirmation, cancellation |
 | `common` | `ClockConfig`, `AirlineProperties`, `GlobalExceptionHandler`, `RequestIdFilter` | Configuration, time, error contract, request-id logging |
 
 `InstanceWindowJob` runs inside the service: a daily cron job, plus a run at startup, that keeps
@@ -70,7 +70,8 @@ Source: [`diagrams/er.mmd`](diagrams/er.mmd). Full DDL with keys, constraints an
   passenger and seat. Passengers are not a separate table: one name per seat is all the brief
   requires.
 - `booking_seat.flight_instance_id` duplicates the booking's, so that the double-booking index
-  can be declared on one table.
+  can be declared on one table. A composite foreign key `(booking_id, flight_instance_id) →
+  booking (id, flight_instance_id)` guarantees the copy always equals the booking's flight.
 
 ## 4. Service interactions and request flows
 
@@ -132,8 +133,10 @@ result both times.
   `available_seats = total_seats = rows × letters`.
 - **Rolling window.** The same top-up runs daily (cron, UTC), once at startup, and on demand
   through `POST /api/v1/admin/instance-window/extend` (e.g. after lengthening the window). It
-  re-generates [today, today + window] for every schedule and inserts with
-  `ON CONFLICT (schedule_id, flight_date) DO NOTHING`. The unique constraint makes the job
+  re-generates [today, today + window + 1 day] for every schedule and inserts with
+  `ON CONFLICT (schedule_id, flight_date) DO NOTHING`. The extra day means the newest bookable
+  date already has its instances when the window moves at midnight, before the daily run; search
+  and booking still stop at today + window. The unique constraint makes the job
   idempotent: a re-run, a run after downtime, or a run on several nodes at once inserts only
   the missing rows.
 - **Seats are derived, not stored.** A seat map is the aircraft's layout minus the taken seats.
@@ -144,7 +147,7 @@ result both times.
 
 Why materialise instances: a booking needs a stable row to reference by foreign key and a
 concrete row to lock, and search becomes a single indexed query. Volume is small: a daily
-flight is 365–366 rows a year, and a few hundred schedules come to about 100,000 rows a year.
+flight is 366–367 rows a year, and a few hundred schedules come to about 100,000 rows a year.
 
 | Alternative | Why not |
 | --- | --- |
@@ -230,9 +233,10 @@ Source: [`diagrams/booking-state.mmd`](diagrams/booking-state.mmd)
   overdue hold as `AVAILABLE`; search adds seats on overdue holds back to the counter (one
   grouped count query after the instance search); `GET /bookings/{reference}` reports an overdue
   `HELD` booking as `EXPIRED`.
-- **The flag is read in one place**, the configuration that picks the `BookingPolicy`. Expiry
-  and the read rules above run regardless: with the flag off there are never `HELD` rows, so they
-  find nothing and the results equal the plain counter.
+- **The flag is read only from `AirlineProperties`**: where the `BookingPolicy` is chosen, and
+  in the two places that would otherwise run hold-specific queries (expiry on writes, the
+  overdue-hold count on search). With the flag off those queries are skipped, so the default path
+  pays nothing for the feature; the seat map's single query and `effectiveStatus` need no branch.
 - **Seat map states stay two:** a live hold shows as `BOOKED`.
 
 ## 9. Major design decisions
@@ -245,7 +249,7 @@ Source: [`diagrams/booking-state.mmd`](diagrams/booking-state.mmd)
 | Cancellation | Soft release (status change) | Delete rows | Keeps history; partial index frees the seat immediately |
 | Booking reference | 6-character PNR from an unambiguous alphabet, `SecureRandom` | UUID, sequence | Readable for customers, not guessable; unique constraint is the final guard |
 | Lookup and cancel | By booking reference only | Reference + surname | No authentication in scope; the reference is the bearer secret |
-| Cancellation rules | `CancellationPolicy` Strategy, one implementation today (cancellable before departure) | Rule inline in the service | Deliberate exception to "no interface without a second implementation": cancellation rules (cut-off windows, admin override) are the most likely next change, and a new rule becomes one new class with no change to locking, transactions or schema |
+| Cancellation rules | One rule ("before departure"), a single check inline in `BookingService` | A `CancellationPolicy` Strategy | Only one rule exists; a Strategy earns its place when a second implementation does, as `BookingPolicy` shows |
 | Seat hold | Strategy behind a flag, lazy expiry | Always-on holds, scheduled clean-up | Brief describes one-step booking; the flag shows the extension without changing default behaviour |
 | Package structure | By feature (`schedule`, `flight`, `booking`), layered inside | Package by layer | Related code changes together; feature boundaries are visible and testable (ArchUnit) |
 | Error format | RFC 9457 `ProblemDetail` + machine-readable `code` and `requestId` on every error, framework errors included | Custom error body | Standard shape, supported natively by Spring; clients branch on `code`, support traces by `requestId` |
@@ -312,7 +316,7 @@ Not built; each step is listed with the signal that would justify it.
 | Idempotency key on `POST /bookings` | Clients retry on timeouts and duplicate bookings appear |
 | Scheduled clean-up of expired holds | Seat hold is enabled and flights with stale holds see few writes, so lazy expiry lags in reports |
 | Finer-grained locking (per seat) | Measured lock waits on a single very popular flight become significant |
-| Second cancellation rule (cut-off before departure, admin override, fees) as a new `CancellationPolicy` | The business defines a cancellation rule other than "before departure" |
+| A `CancellationPolicy` Strategy (cut-off before departure, admin override, fees), like `BookingPolicy` | The business defines a second cancellation rule |
 | Partial cancellation (some passengers only) | Customers ask to drop one passenger; seat-level status and `released_at` already support it, no migration needed |
 | Surname check alongside the reference for lookup and cancel; a mismatch returns 404 like an unknown reference | Self-service is exposed beyond trusted channels without user accounts; a strict match would split `passenger_name` into first and last name (additive migration) |
 | Value types for seat labels and booking references | Seats gain attributes (class, window/aisle) or seat strings travel through many APIs |
@@ -357,3 +361,4 @@ The brief is single-airline, but no part of the design depends on it.
 | 2026-10-08 | Configurable window: `airline.booking-window-days` is the single definition of the window (`AirlineProperties.lastBookableDate`), now also enforced at booking; `Retry-After` is configuration (`airline.retry-after`); Compose passes `AIRLINE_*` overrides through (LLD §2, §5, §6) |
 | 2026-10-08 | Phase 8: documentation finished: links to README and ADRs; multiple-airlines and aircraft-rotation notes in §11; LLD aligned with the final code |
 | 2026-10-08 | Phase 9: manual top-up endpoint `POST /admin/instance-window/extend` (§5); a booking-reference clash returns 503 `RETRY_LATER` instead of 500; `airline.retry-after` shared by both 503s; job runs log under their own id; tracing and scheduler-lock rows in §11 (LLD §2, §4, §6, §7, §9) |
+| 2026-10-09 | Phase 10 (hardening): cancellation rule inlined (no `CancellationPolicy`); hold queries skipped with the flag off (§8); instances generated one day past the window (§5); startup top-up never aborts boot; V5 composite FK and format CHECKs (data model); PostgreSQL published on 5433 |

@@ -36,8 +36,8 @@ class BookingWindowConfigTest extends IntegrationTest {
 		scheduleService.createSchedule(new CreateScheduleCommand("XY101", "DXB", "LHR", LocalTime.parse("09:30"),
 				LocalTime.parse("13:45"), 1L, EnumSet.allOf(DayOfWeek.class)));
 
-		// Generation: today plus 30 days, both ends included.
-		assertThat(jdbcTemplate.queryForObject("SELECT COUNT(*) FROM flight_instance", Integer.class)).isEqualTo(31);
+		// Generation: today plus 30 days, both ends included, plus one day of look-ahead for the daily job.
+		assertThat(jdbcTemplate.queryForObject("SELECT COUNT(*) FROM flight_instance", Integer.class)).isEqualTo(32);
 
 		// Search: day 30 is the last searchable date.
 		search("2026-02-04").andExpect(status().isOk()).andExpect(jsonPath("$", hasSize(1)));

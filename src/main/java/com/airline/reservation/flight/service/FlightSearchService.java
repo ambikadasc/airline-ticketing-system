@@ -51,8 +51,11 @@ public class FlightSearchService {
 
 		Instant now = clock.instant();
 		List<FlightInstance> flights = instanceRepository.search(origin, destination, date, now);
-		Map<Long, Integer> freedByExpiredHolds = seatOccupancy.seatsOnOverdueHolds(
-				flights.stream().map(FlightInstance::getId).toList(), now);
+		// Seats on holds that expired but are not yet released count as free. With the seat hold
+		// disabled no hold exists, so the query is skipped and the counter alone is the answer.
+		Map<Long, Integer> freedByExpiredHolds = properties.seatHold().enabled()
+				? seatOccupancy.seatsOnOverdueHolds(flights.stream().map(FlightInstance::getId).toList(), now)
+				: Map.of();
 		return flights.stream()
 				.map(flight -> toResult(flight, flight.getAvailableSeats()
 						+ freedByExpiredHolds.getOrDefault(flight.getId(), 0)))

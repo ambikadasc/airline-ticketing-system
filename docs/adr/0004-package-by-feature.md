@@ -25,9 +25,8 @@ explainable line by line, so structure should help a reader find things, not add
   mapping layer.
 - **Patterns only where the problem has that shape:**
   - Strategy for the booking policy (two real implementations).
-  - Strategy for the cancellation policy. This is a deliberate exception with one
-    implementation, because cancellation rules (cut-off windows, admin override) are the most
-    likely next change.
+  - The cancellation rule ("before departure") is one check inline in `BookingService`. It
+    becomes a Strategy like `BookingPolicy` when a second rule exists, not before.
   - Value object `SeatLayout`; static factories.
   - No interface for `PnrGenerator` or for services.
 - **Booking validation is one class, `BookingRequestValidator`, with one private method per rule.**

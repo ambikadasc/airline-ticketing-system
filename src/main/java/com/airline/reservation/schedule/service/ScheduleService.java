@@ -107,8 +107,11 @@ public class ScheduleService {
 
 	private int generateWindow(FlightSchedule schedule, SeatLayout layout) {
 		LocalDate today = LocalDate.now(clock);
+		// One day past the bookable window: at midnight a new last bookable date appears, and the
+		// daily job runs a few minutes later. Generating ahead means that date already has its
+		// instances. Search and booking still stop at lastBookableDate.
 		List<FlightInstance> instances = FlightInstanceGenerator.generate(schedule, layout, today,
-				properties.lastBookableDate(today));
+				properties.lastBookableDate(today).plusDays(1));
 		return instanceWriter.insertMissing(instances);
 	}
 

@@ -18,7 +18,6 @@ import com.airline.reservation.booking.domain.BookingStatus;
 import com.airline.reservation.booking.domain.PassengerSeat;
 import com.airline.reservation.booking.persistence.BookingRepository;
 import com.airline.reservation.booking.service.policy.BookingPolicy;
-import com.airline.reservation.booking.service.policy.CancellationPolicy;
 import com.airline.reservation.common.config.AirlineProperties;
 import com.airline.reservation.common.error.ApiException;
 import com.airline.reservation.common.error.ErrorCode;
@@ -44,14 +43,13 @@ public class BookingService {
 	private final BookingRequestValidator validator;
 	private final PnrGenerator pnrGenerator;
 	private final BookingPolicy bookingPolicy;
-	private final CancellationPolicy cancellationPolicy;
 	private final AirlineProperties properties;
 	private final Clock clock;
 
 	public BookingService(BookingRepository bookingRepository, FlightInstanceRepository instanceRepository,
 			AircraftRepository aircraftRepository, SeatOccupancyQueries seatOccupancy,
 			BookingRequestValidator validator, PnrGenerator pnrGenerator, BookingPolicy bookingPolicy,
-			CancellationPolicy cancellationPolicy, AirlineProperties properties, Clock clock) {
+			AirlineProperties properties, Clock clock) {
 		this.bookingRepository = bookingRepository;
 		this.instanceRepository = instanceRepository;
 		this.aircraftRepository = aircraftRepository;
@@ -59,7 +57,6 @@ public class BookingService {
 		this.validator = validator;
 		this.pnrGenerator = pnrGenerator;
 		this.bookingPolicy = bookingPolicy;
-		this.cancellationPolicy = cancellationPolicy;
 		this.properties = properties;
 		this.clock = clock;
 	}
@@ -163,7 +160,11 @@ public class BookingService {
 		if (booking.getStatus() == BookingStatus.CANCELLED || booking.getStatus() == BookingStatus.EXPIRED) {
 			return BookingResult.from(booking, flight, now);
 		}
-		cancellationPolicy.verifyCancellable(booking, flight, now);
+		// The one cancellation rule: a booking can be cancelled until its flight departs.
+		if (flight.isDepartedAt(now)) {
+			throw new ApiException(ErrorCode.BOOKING_NOT_CANCELLABLE,
+					"Booking " + reference + " cannot be cancelled: the flight has departed");
+		}
 
 		int released = booking.cancel(now);
 		flight.release(released);
@@ -193,9 +194,13 @@ public class BookingService {
 	/**
 	 * Lazy hold expiry, with no scheduler: holds on this flight that are past their expiry become
 	 * EXPIRED and their seats go back to the flight. Runs under the flight lock, so it cannot race a
-	 * confirmation or a new booking. Finds nothing when the seat hold is disabled.
+	 * confirmation or a new booking. Skipped when the seat hold is disabled: no hold can exist, so
+	 * the default path pays nothing for the feature.
 	 */
 	private void expireHolds(FlightInstance flight, Instant now) {
+		if (!properties.seatHold().enabled()) {
+			return;
+		}
 		List<Booking> overdue = bookingRepository.findOverdueHolds(flight.getId(), now);
 		if (overdue.isEmpty()) {
 			return;

@@ -24,7 +24,7 @@ erDiagram
     }
     FLIGHT_SCHEDULE {
         bigint id PK
-        varchar(8) flight_number UK
+        varchar(8) flight_number UK "CHECK format"
         varchar(3) origin_code FK
         varchar(3) destination_code FK "<> origin"
         time departure_time "UTC"
@@ -63,8 +63,8 @@ erDiagram
     BOOKING_SEAT {
         bigint id PK
         bigint booking_id FK
-        bigint flight_instance_id FK "partial UK with seat_number"
-        varchar(4) seat_number "e.g. 12A"
+        bigint flight_instance_id FK "copied from booking, composite FK keeps it equal; partial UK with seat_number"
+        varchar(4) seat_number "e.g. 12A, CHECK format"
         varchar(120) passenger_name
         varchar(16) status "ACTIVE, HELD, RELEASED"
         timestamptz created_at

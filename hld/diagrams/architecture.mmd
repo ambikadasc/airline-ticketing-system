@@ -16,7 +16,6 @@ flowchart TB
             SearchSvc["FlightSearchService<br/>SeatMapService"]
             BookingSvc["BookingService"]
             Policy["BookingPolicy<br/>Immediate | SeatHold<br/>(airline.seat-hold.enabled)"]
-            CancelPolicy["CancellationPolicy<br/>BeforeDeparture"]
         end
         Job["InstanceWindowJob<br/>daily cron + on startup"]
         subgraph Domain["Domain model"]
@@ -38,7 +37,6 @@ flowchart TB
     ScheduleSvc --> Generator
     Job --> ScheduleSvc
     BookingSvc --> Policy
-    BookingSvc --> CancelPolicy
     Services --> Domain
     Services --> Repos
     ScheduleSvc --> Bulk

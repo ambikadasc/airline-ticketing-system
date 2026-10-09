@@ -27,7 +27,7 @@ Docker Compose
 
 ### Build
 ```bash
-./mvnw verify          # compiles and runs all 310 tests against a real PostgreSQL (needs Docker)
+./mvnw verify          # compiles and runs all 312 tests against a real PostgreSQL (needs Docker)
 ```
 
 ### Run
@@ -36,6 +36,9 @@ docker compose up --build          # PostgreSQL + the application on http://loca
 ```
 Then open http://localhost:8080/swagger-ui.html, or check http://localhost:8080/actuator/health.
 Stop with `docker compose down -v` (`-v` also deletes the database).
+
+PostgreSQL is published on `localhost:5433` (not 5432, so a PostgreSQL already running on your
+machine is not in the way); inside Compose the application reaches it as `db:5432`.
 
 Developer alternative, running the app from the source tree against the Compose database:
 ```bash
@@ -81,7 +84,7 @@ not a setting.
 
 ### Database initialization
 Automatic. On startup Flyway applies [`db/migrations`](db/migrations/):
-- `V1`–`V3` create the schema
+- `V1`–`V3` create the schema, `V5` adds integrity rules (a composite foreign key and format checks)
 - `V4` seeds the reference data, which is read-only (there is no CRUD API for it):
   - **10 airports:** DXB, LHR, JFK, SIN, KHI, LHE, ISB, DOH, FRA, CDG
   - **3 aircraft:** id 1 A320 (30 rows × ABCDEF = 180 seats), id 2 B777 (40 × ABCDEFGHJK = 400),
@@ -124,7 +127,7 @@ curl -s -X POST localhost:8080/api/v1/admin/schedules -H 'Content-Type: applicat
   "flightNumber": "XY101", "origin": "DXB", "destination": "LHR",
   "departureTime": "09:30", "arrivalTime": "13:45", "aircraftId": 1,
   "daysOfOperation": ["MONDAY", "WEDNESDAY", "FRIDAY"]}'
-# -> 201 {"id":1, ..., "generatedInstances":157}   (about 157: Mon/Wed/Fri for one year)
+# -> 201 {"id":1, ..., "generatedInstances":158}   (Mon/Wed/Fri for a year, plus one look-ahead day)
 
 # 2. Search a Monday (any date from today up to 365 days ahead)
 curl -s 'localhost:8080/api/v1/flights?origin=DXB&destination=LHR&date=2026-11-02'
@@ -212,7 +215,10 @@ Flights that have already departed today are hidden. A non-operating date return
    (to heal downtime), and on demand through `POST /admin/instance-window/extend` (e.g. after
    lengthening the window). It re-generates the window for every schedule and inserts with
    `ON CONFLICT (schedule_id, flight_date) DO NOTHING`, so re-runs, gaps, overlapping triggers
-   and several nodes are all safe.
+   and several nodes are all safe. Instances are generated one day past the bookable window, so
+   the newest bookable date already exists when the window moves at midnight, before the daily
+   job has run. A startup run that fails is logged and left to the daily job; it never stops the
+   application from starting.
 
 **How seat availability is computed.** Each instance keeps an `available_seats` counter. It is
 decremented by a booking and incremented by a cancellation, always inside the transaction that
@@ -292,7 +298,7 @@ cancellations could both see it as confirmed.
 ```
 find flight id by reference (404 if unknown)  →  LOCK flight row  →  [seat hold: release expired holds]
 →  load booking + seats  →  already CANCELLED/EXPIRED? return it unchanged (200)
-→  cancellation policy: flight departed? (409 BOOKING_NOT_CANCELLABLE)
+→  flight departed? (409 BOOKING_NOT_CANCELLABLE)
 →  booking CANCELLED, seats RELEASED  →  counter += n  →  COMMIT
 ```
 The lock order is the same as booking's, so cancellation and booking can never deadlock.
@@ -307,8 +313,8 @@ immediately, and the history stays. The seats go back to the flight's counter.
 - Each seat: `ACTIVE → RELEASED`.
 - Cancelling again returns the current state with 200 and changes nothing. Ten simultaneous
   cancellations release the seats exactly once (tested).
-- Whether a booking may be cancelled is a `CancellationPolicy` (today: before departure). A new
-  rule is a new class.
+- The one cancellation rule, "before departure", is a single check in `BookingService`. If a
+  second rule arrives, it becomes a Strategy like `BookingPolicy`; not before.
 
 ---
 
@@ -368,7 +374,7 @@ immediately, and the history stays. The seats go back to the flight's counter.
 | Single source of truth (DRY) | `SeatLayout` alone defines a valid seat; `SeatOccupancyQueries.takenSeats` alone defines a taken seat (seat map and booking); `ErrorCode` holds every code and status | No duplicated seat or availability rules across features |
 | Encapsulation, behaviour on entities | `Booking.cancel/confirm/expireHold`, `FlightInstance.reserve/release/isDepartedAt`, `FlightSchedule.operatesOn` | No public setters; no anaemic entities with logic in services |
 | State machine (enum) | `BookingStatus.canTransitionTo`; every transition goes through it | No status setter; no framework state machine |
-| Strategy | `BookingPolicy` (immediate or seat hold, the flag is read once in `BookingPolicyConfig`); `CancellationPolicy` (one rule today, the expected extension point) | No interface for `PnrGenerator` or for services: there is no second implementation |
+| Strategy | `BookingPolicy` (immediate or seat hold, chosen once in `BookingPolicyConfig`) | No interface for `PnrGenerator`, the cancellation rule or services: each has one implementation |
 | Value object | `SeatLayout` record (validated, immutable) | Seat labels and references stay `String`; a type would add mapping for no rule |
 | Static factory methods | `Booking.confirmed/held`, `FlightSchedule.create`, `FlightInstance.scheduled` | No builders in production code |
 | Tell, don't ask (Law of Demeter) | `aircraft.seatLayout()`, `schedule.operatesOn(day)`, `flight.isDepartedAt(now)` | No getter chains |
@@ -391,7 +397,7 @@ None of this is built. Each step is paired with the signal that would justify it
 | Idempotency key on `POST /bookings` | Clients retry on timeouts and duplicate bookings appear |
 | Scheduled sweep of expired holds | The seat hold is on and flights with stale holds see few writes (reporting lags) |
 | Finer-grained locking (per seat) | Measured lock waits on a single very popular flight |
-| A second `CancellationPolicy` (cut-off window, admin override, fees) | The business defines a cancellation rule other than "before departure" |
+| A `CancellationPolicy` Strategy (cut-off window, admin override, fees), like `BookingPolicy` | The business defines a second cancellation rule; today the one rule is a single check in `BookingService` |
 | Partial cancellation | Customers ask to drop one passenger; seat-level status already supports it, no migration |
 | Surname check with the reference on lookup and cancel | Self-service is exposed publicly without accounts |
 | Authentication and role-based access on `/admin` | Any deployment beyond a demo |
@@ -425,7 +431,7 @@ coordination outside this system), and aircraft-rotation clashes (see the table 
 
 ## Testing approach
 
-310 tests, all run by `./mvnw verify`. Integration tests use PostgreSQL 16 in Testcontainers with
+312 tests, all run by `./mvnw verify`. Integration tests use PostgreSQL 16 in Testcontainers with
 the real Flyway migrations. No H2, and no test runs inside a test transaction.
 
 | Kind | What it proves | Classes |
@@ -435,7 +441,7 @@ the real Flyway migrations. No H2, and no test runs inside a test transaction.
 | Concurrency | Exactly one winner for one seat (50 threads); no partial overlap; concurrent cancels release once; cancel-vs-book stays consistent; inventory invariant after every scenario; duplicate-number race gives no 500 | `BookingConcurrencyTest`, `CancellationConcurrencyTest`, `DuplicateFlightNumberRaceTest` |
 | Error contract | All 21 reachable error codes have the same shape and leak nothing; lock timeout → 503; a booking-reference clash → 503 `RETRY_LATER`, nothing stored; request ids; job-run ids | `ErrorContractTest`, `LockTimeoutTest`, `BookingReferenceClashTest`, `RequestIdFilterTest`, `GlobalExceptionHandlerTest`, `InstanceWindowJobLogIdTest` |
 | Seat hold on | Hold → confirm; expiry frees seats; confirm-vs-expiry race (the clock decides the single winner) | `SeatHoldTest` |
-| Edge cases and configuration | Last day of the window, overnight, created late in the day, last free seat, more seats than remain; a 30-day window applied by configuration to generation, search and booking | `EdgeCasesTest`, `BookingWindowConfigTest` |
+| Edge cases, configuration, schema | Last day of the window, overnight, created late in the day, last free seat, more seats than remain; a 30-day window applied by configuration to generation, search and booking; database-carried rules (seat row must match its booking's flight, seat and flight-number formats) | `EdgeCasesTest`, `BookingWindowConfigTest`, `SchemaIntegrityTest` |
 | Architecture | Controllers never reach repositories; nothing depends on the API layer; no package cycles | `ArchitectureTest` |
 
 The single-seat race test was first run **without** the lock and the unique index (10 of 50
@@ -454,7 +460,7 @@ and the full build passed 3 clean runs in a row.
 ├── src/main/java/…           the application (packaged by feature)
 ├── src/main/resources/       application.yml
 ├── db/                       schema.sql (commented snapshot), migrations/ (Flyway V1–V4)
-├── tests/                    java/ (all tests), resources/
+├── tests/                    java/ (all tests)
 ├── scripts/smoke-test.sh     end-to-end check against a running stack
 ├── DECISIONS.md              one-line log of every decision, by phase
 ├── Dockerfile, docker-compose.yml

@@ -11,6 +11,7 @@ import com.airline.reservation.schedule.service.InstanceWindowResult;
 import com.airline.reservation.schedule.service.ScheduleService;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -47,6 +48,14 @@ class InstanceWindowJobLogIdTest {
 		when(scheduleService.extendInstanceWindow()).thenThrow(new IllegalStateException("database down"));
 
 		assertThatIllegalStateException().isThrownBy(job::runDaily);
+		assertThat(MDC.get("requestId")).isNull();
+	}
+
+	@Test
+	void aFailingStartupRunDoesNotStopTheApplication() {
+		when(scheduleService.extendInstanceWindow()).thenThrow(new IllegalStateException("lock timeout"));
+
+		assertThatCode(() -> job.run(new DefaultApplicationArguments())).doesNotThrowAnyException();
 		assertThat(MDC.get("requestId")).isNull();
 	}
 

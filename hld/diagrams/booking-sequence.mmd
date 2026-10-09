@@ -7,15 +7,16 @@ sequenceDiagram
     participant DB as PostgreSQL
 
     C->>API: POST /api/v1/bookings
-    API->>API: Bean Validation (shape, 1..9 passengers)
+    API->>API: Bean Validation (shape: ids, names, seat numbers present)
     API->>S: createBooking(command)
-    S->>S: BookingRequestValidator<br/>(normalise seats, format, duplicates)
+    S->>S: BookingRequestValidator<br/>(1..9 passengers, normalise seats, format, duplicates)
     S->>DB: BEGIN
     S->>DB: SELECT flight_instance ... FOR UPDATE
     Note over S,DB: Writes on this flight are now serialised.<br/>Other flights are unaffected.
-    S->>DB: expireHolds(instance, now): overdue HELD -> EXPIRED,<br/>seats RELEASED, available_seats restored<br/>(finds nothing when seat hold is off)
-    S->>S: flight not departed? seats exist in SeatLayout?
-    S->>DB: SELECT seat_number FROM booking_seat<br/>WHERE status IN (ACTIVE, HELD) AND seat_number IN (...)
+    S->>DB: expireHolds(instance, now): overdue HELD -> EXPIRED,<br/>seats RELEASED, available_seats restored<br/>(skipped when the seat hold is off)
+    S->>S: flight not departed? inside the booking window?<br/>seats exist in SeatLayout?
+    S->>DB: takenSeats(flight): seat_number FROM booking_seat<br/>WHERE status IN (ACTIVE, HELD) [HELD only while the hold is live]
+    S->>S: requested seats ∩ taken seats
     alt any requested seat taken
         S->>DB: ROLLBACK
         S-->>API: SeatUnavailableException(seats)

@@ -25,7 +25,7 @@ class InstanceWindowJobTest extends IntegrationTest {
 
 		assertThat(scheduleService.extendInstanceWindow().inserted()).isZero();
 		assertThat(scheduleService.extendInstanceWindow().inserted()).isZero();
-		assertThat(instanceCount()).isEqualTo(366);
+		assertThat(instanceCount()).isEqualTo(367);
 	}
 
 	@Test
@@ -35,10 +35,10 @@ class InstanceWindowJobTest extends IntegrationTest {
 				DELETE FROM flight_instance
 				WHERE flight_date > (SELECT MAX(flight_date) - 10 FROM flight_instance)
 				""");
-		assertThat(instanceCount()).isEqualTo(356);
+		assertThat(instanceCount()).isEqualTo(357);
 
 		assertThat(scheduleService.extendInstanceWindow().inserted()).isEqualTo(10);
-		assertThat(instanceCount()).isEqualTo(366);
+		assertThat(instanceCount()).isEqualTo(367);
 	}
 
 	private CreateScheduleCommand dailyXy101() {

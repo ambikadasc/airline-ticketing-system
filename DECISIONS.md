@@ -1,139 +1,77 @@
 # Decision log
 
-One line per decision, newest phase last. The reasoning for the major ones is in
-`hld/architecture.md` (section 9) and, from Phase 8, in `docs/adr/`.
+The decisions behind this system, one line each, grouped by topic. The reasoning for the major
+ones, with the alternatives that were rejected, is in `hld/architecture.md` (section 9) and
+`docs/adr/`.
 
-## Design (Phase D)
-- Flight instances are materialised one row per operating date for 365 days ahead; seats are derived, not stored.
-- Concurrency: pessimistic lock on the flight-instance row for every write, plus the partial unique index `uq_active_seat` as a backstop; READ COMMITTED; 3 s lock timeout → 503.
-- No `@Version` column: the flight lock already serialises cancellations; optimistic locking is a documented alternative.
-- Availability is a counter on `flight_instance`, changed only under the flight lock.
-- Seat hold is optional, behind `airline.seat-hold.enabled` (default `false`) and `airline.seat-hold.ttl`; expired holds are released lazily under the flight lock, with no scheduler.
-- The seat-hold flag is read only where the `BookingPolicy` bean is chosen; hold expiry and hold-aware reads run either way and find nothing when the flag is off.
-- `CancellationPolicy` is a Strategy with one implementation (cancellable before departure): a deliberate exception to "no interface without a second implementation".
-- Lookup and cancel use the booking reference only; a surname check is a documented future step.
-- Arrival-day offset is derived (arrival at or before departure = next day), stored as 0 or 1; flights over 24 h are out of scope.
+## Flight generation
+- Flight instances are materialised, one row per operating date, for today + `airline.booking-window-days` (default 365); seats are derived, not stored (ADR 0001).
+- Instances are generated one day past the bookable window, so the newest bookable date already exists when the window moves at midnight, before the daily job runs; search and booking still stop at the window's end.
+- Generation runs in the schedule-creation transaction, at startup, daily (cron, UTC) and on demand (`POST /admin/instance-window/extend`); all four use one idempotent JDBC batch insert (`ON CONFLICT (schedule_id, flight_date) DO NOTHING`).
+- The startup run never stops the application: a failure is logged at WARN and the daily job or the endpoint catches up.
+- Each job run logs under its own id (`job-startup-…`, `job-daily-…`) in the same logging key as an HTTP request id.
+- The arrival-day offset is derived (arrival at or before departure means the next day), stored as 0 or 1; flights over 24 h are out of scope.
+- `FlightInstanceGenerator` and the job live in `schedule`, so feature packages have no cycles.
+
+## Concurrency and locking
+- Every write (book, confirm, cancel) locks the `flight_instance` row first (`SELECT … FOR UPDATE`); the partial unique index `uq_active_seat` over ACTIVE and HELD seats is the database backstop (ADR 0002).
+- READ COMMITTED; `lock_timeout = 3s` per connection, surfaced as 503 `LOCK_TIMEOUT` with `Retry-After`.
+- One lock per transaction, always the flight: no deadlock cycle; cancellation looks up only the flight id by reference, locks, then loads the booking, so two concurrent cancels cannot both release the seats.
+- No `@Version` column: the row lock already serialises writes.
+- Availability is a counter on the flight, changed only under the lock; the invariant `available_seats = total − taken rows` is asserted in tests.
+
+## Booking and references
+- A booking is all or nothing; a conflict lists the taken seats in a 409.
+- The seat-conflict check reuses `SeatOccupancyQueries.takenSeats`, the same definition of a taken seat as the seat map.
+- Booking references are random (SecureRandom, 6 characters, no look-alike letters), not sequential, because the reference alone opens and cancels a booking; uniqueness comes from `uq_booking_reference`, and `existsByReference` (up to 5 draws) only avoids clashes with committed bookings (ADR 0005).
+- A reference clash between two concurrent bookings, or no free reference in 5 draws, returns 503 `RETRY_LATER` with `Retry-After`; nothing is booked.
+- The maximum passengers per booking is configuration (`airline.max-seats-per-booking`), checked by `BookingRequestValidator`, which has one private method per rule; a rule list is the refactor path if rules grow.
 - `SeatLayout` is the only value object; seat numbers and references stay `String`, days stay `Set<DayOfWeek>`.
-- `FlightInstanceGenerator` and `InstanceWindowJob` live in `schedule`, and seat-occupancy reads live in `flight.persistence`, so feature packages have no cycles.
-- Services return `*Result` records used directly as response bodies; requests map to `*Command` records.
-- Errors: RFC 9457 ProblemDetail with `code` and `requestId` on every error, framework errors included; 400 for all invalid input (not 422), 409 for state conflicts; 4xx logged at WARN, 5xx at ERROR.
-- New error codes beyond the original catalogue: `HOLD_EXPIRED`, `BOOKING_NOT_CONFIRMABLE`, `RESOURCE_NOT_FOUND`, `METHOD_NOT_ALLOWED`, `NOT_ACCEPTABLE`, `UNSUPPORTED_MEDIA_TYPE`.
-- Every `201` carries a `Location` header.
+- Booking a flight dated beyond the window returns 400 `OUTSIDE_BOOKING_WINDOW`, so shortening the window takes effect at once.
 
-## Phase 0 – Skeleton
-- Project generated with Spring Initializr on Spring Boot 4.1.1 / Java 21; POM not hand-written.
-- Tests live in `tests/java`, migrations in `db/migrations` (packaged as `classpath:db/migration`), to match the required repository layout.
-- Surefire only (no Failsafe): every test runs in the `test` phase of `./mvnw verify`, with `-Duser.timezone=UTC`.
-- springdoc-openapi 3.1.1 (the Boot 4 line) for Swagger UI at `/swagger-ui.html`.
-- No Spring Boot Docker Compose support dependency: Compose is started explicitly (`docker compose up`), not by the application.
-- Integration tests share `TestcontainersConfiguration`: a `postgres:16` container and a fixed clock at 2026-01-05T00:00:00Z (a Monday).
-- The Docker image build skips tests because they need Docker; tests run with `./mvnw verify`.
+## Cancellation
+- Soft release: the booking becomes CANCELLED and its seats RELEASED; history is kept and the seats are bookable again at once.
+- Idempotent: cancelling a CANCELLED (or EXPIRED) booking returns it unchanged.
+- The one rule, "before departure", is an inline check in `BookingService`; a `CancellationPolicy` Strategy is introduced only when a second rule exists.
+- Lookup and cancel use the reference only; a surname check is a documented future step.
 
-## Phase 1 – Schema and reference data
-- Migrations V1–V3 are `db/schema.sql` split by area (same DDL and comments); V4 holds seed data only. A `pg_dump --schema-only` of each showed identical schemas.
-- Seed aircraft use fictional registrations `A6-XYA` (A320, 180 seats), `A6-XYB` (B777, 400), `A6-XYC` (ATR72, 72), with explicit ids 1–3 and the identity sequence moved past them.
-- Read-only repositories extend Spring Data's bare `Repository` and declare only the finders in use, so seeded data has no save or delete methods.
-- `SeatLayout` validates its own invariants (rows 1–99, distinct letters A–Z); duplicate letters are checked only in Java.
-- `SeatLayout.contains` is case-sensitive and does not trim; normalising seat input is the booking validator's job, so it happens in one place.
+## Seat hold (optional, off by default)
+- `BookingPolicy` Strategy (`ImmediateConfirmationPolicy` or `SeatHoldPolicy`), chosen once from `airline.seat-hold.enabled` (ADR 0003).
+- Expired holds are released lazily under the flight lock on every write; reads compute around overdue holds (seat map shows them AVAILABLE, search adds them back, GET reports EXPIRED). No scheduler.
+- With the flag off the hold-specific queries (expiry on writes, overdue-hold count on search) are skipped, so the default path pays nothing for the feature; the flag is read only from `AirlineProperties`.
+- Confirm: CONFIRMED returns unchanged (also with the flag off); CANCELLED → 409 `BOOKING_NOT_CONFIRMABLE`; EXPIRED or overdue → 409 `HOLD_EXPIRED`; departed → 409 `FLIGHT_NOT_BOOKABLE`.
+- `hold_expires_at` is rounded to whole seconds, kept after the hold ends, and shown in the API only while HELD.
 
-## Phase 2 – Schedules and instance generation
-- `ApiException` is one concrete class carrying an `ErrorCode` (which holds the HTTP status); subclasses only when a response carries extra fields. `ErrorCode` gains constants in the phase that first uses them.
-- The handler skeleton adds `code` to every framework error by status (400 → `VALIDATION_ERROR`, 404 → `RESOURCE_NOT_FOUND`, 405/406/415) and an `errors` list for bean-validation failures; Phase 6 completes it.
-- The instance window is [today, today + 365], 366 dates, both ends inclusive; today's instance is created even if it has already departed (search and booking filter departed flights).
-- An arrival time equal to the departure time is treated as next-day (offset 1).
-- Schedule times are returned as `HH:mm` (`@JsonFormat`), matching the request format; Jackson 3's default would add seconds.
-- `FlightInstanceBulkWriter` inserts in JDBC batches of 500 with `ON CONFLICT DO NOTHING` and returns the rows actually inserted.
-- `findByIdForUpdate` and `FlightInstance` behaviour (`reserve`, `release`, `isDepartedAt`) are deferred to the phases that use and test them.
-- All integration tests extend one `IntegrationTest` base (one Spring context, one PostgreSQL container); each test starts from truncated transactional tables.
+## Errors and logging
+- Every error, framework errors included, is an RFC 9457 ProblemDetail with `code` and `requestId`; bodies never contain exception, class, SQL or constraint names.
+- 400 for all invalid input (not 422), 404 for unknown ids, 409 for conflicts with resource state, 503 with `Retry-After` for temporary conditions where nothing changed.
+- Unique-constraint violations are mapped by constraint name (`uq_active_seat` → 409, `uq_schedule_flight_number` → 409, `uq_booking_reference` → 503); anything else is a 500.
+- 4xx and 503 are logged at WARN on one line; other 5xx at ERROR with the stack trace; passenger names are never logged.
+- `X-Request-Id` is accepted only if it matches `^[A-Za-z0-9._-]{1,64}$`, otherwise a UUID is generated; the id is on every log line and in every error body.
+- Distributed tracing is not built (one service, one database); it is a documented scaling step.
 
-## Phase 3 – Search and seat map
-- Search adds back seats on overdue holds with a second, grouped query for the instances found (not a correlated subquery): `flight` reaches `booking_seat` only through SQL, and this avoids a persistence-layer row type.
-- Hold-aware reads (seat map BOOKED for live holds only; search count) are built and tested now with SQL fixtures; Phase 4b adds only the write side.
-- Seat-map `availableSeats` is total seats minus the taken seats in the same response, so the number always matches the list.
-- Departed flights still have a seat map (read by id); search hides them and booking rejects them.
-- Query-parameter constraint failures (`HandlerMethodValidationException`) also return an `errors` list, with the parameter name as `field`.
-- The seat-map availability enum is `SeatAvailability { AVAILABLE, BOOKED }`, named apart from booking's `SeatStatus`.
+## Configuration
+- All business settings are `airline.*` properties, overridable by environment variable (`AIRLINE_BOOKING_WINDOW_DAYS` etc.) and passed through by Compose when set; `airline.retry-after` serves both 503s.
+- Format rules (seat, flight number, reference) stay in code and in database CHECKs because changing them needs a migration.
+- PostgreSQL is published on `127.0.0.1:5433` by Compose so a local PostgreSQL on 5432 does not clash; the application's default URL matches.
 
-## Phase 4 – Booking
-- **Race test shown failing, then passing.** 50 threads book seat 12A on one flight at once. With the flight lock replaced by a plain read *and* `uq_active_seat` commented out of V3: **10 successes out of 50, in each of 3 runs** (10 = the connection-pool size: every transaction that ran concurrently booked the seat). With `findByIdForUpdate` and the index restored (V3 byte-identical, `git diff` empty): **exactly 1 success, 49 `SeatUnavailableException`, in each of 3 runs.** The broken state was never committed.
-- The concurrency class (same seat ×50, 50 different seats, overlapping 1A+1B / 1B+1C ×20) passed 5 runs in a row; after each scenario the counter equals total minus active seats and no seat is active twice.
-- The seat-conflict check reuses `SeatOccupancyQueries.takenSeats`: one definition of a taken seat for seat map, search and booking.
-- `BookingPolicy`, HELD/EXPIRED and confirm are deferred to Phase 4b; `BookingStatus`/`SeatStatus` gain constants in the phase that uses them.
-- `ApiException.extraProperties()` lets subclasses (`SeatUnavailableException`, `InvalidSeatException`) add fields such as `unavailableSeats` to the error body.
-- The maximum passengers per booking is checked by `BookingRequestValidator` from `airline.max-seats-per-booking`, not a hard-coded `@Size`.
-- Booking references are matched exactly as given (PNRs are upper case).
-- A seat conflict is logged at INFO with flight id and seat numbers; passenger names are never logged.
-- The unique-index violation → 409 mapping is added in Phase 6; with the lock in place the index is not reached in these tests.
+## Data model and database
+- PostgreSQL 16, Flyway (forward-only V1–V5; seed data in V4), Hibernate validates only; tests run on the same engine (ADR 0006).
+- `db/schema.sql` is a commented snapshot kept identical to the migrated schema (verified with `pg_dump --schema-only`); a raw dump is not used because it drops the comments.
+- `booking_seat.flight_instance_id` is denormalised for the partial index; a composite foreign key to `booking (id, flight_instance_id)` keeps it equal to the booking's flight (V5).
+- Seat-number and flight-number formats are CHECK constraints as well as API validation (V5).
+- Every index is commented with the query it serves; PostgreSQL-specific SQL carries its MySQL equivalent.
 
-## Phase 5 – Cancellation
-- Cancellation looks up only the flight id by reference (`findFlightInstanceIdByReference`, no entity), locks the flight, then loads the booking: same lock order as booking, and the booking is never a stale copy.
-- `BookingStatus.canTransitionTo` is the enum state machine (CONFIRMED → CANCELLED; CANCELLED terminal). An illegal transition throws `IllegalStateException` (a bug → 500); the expected case, already cancelled, is returned unchanged by the service first (idempotent 200, nothing released or logged).
-- `CancellationPolicy` has one implementation, `BeforeDepartureCancellationPolicy` (`@Component`, no config switch until a second rule exists); it is called under the lock after the idempotent check.
-- `FlightInstance.release(n)` is guarded by `total_seats`, mirroring `reserve`.
-- The cancel response is the full booking with status CANCELLED; its seats stay listed as a record of what was booked.
-- Concurrency test helpers (start-gate runner, outcome counting, inventory invariant) live in one shared `ConcurrencySupport` used by both concurrency classes. Both classes passed 5 runs in a row.
+## Code structure
+- Package by feature, layered inside; dependencies run `booking → flight → aircraft, airport` and `schedule → flight, aircraft, airport`; enforced by three ArchUnit rules (ADR 0004).
+- JPA entities are the domain model, with behaviour and an enum state machine; no public status setters.
+- Services return `*Result` records used directly as response bodies; request records map to `*Command` records.
+- `ApiException` is one concrete class carrying an `ErrorCode`; subclasses only where a response carries extra fields.
+- Read-only reference data uses Spring Data's bare `Repository` with finders only.
 
-## Phase 4b – Seat hold
-- `BookingPolicy` (Strategy) with `ImmediateConfirmationPolicy` and `SeatHoldPolicy`, chosen once in `BookingPolicyConfig`: the only place `airline.seat-hold.enabled` is read. The policies are plain classes, so exactly one bean exists.
-- Lazy expiry: every write on a flight (book, confirm, cancel) locks the flight, then releases its overdue holds, then works on bookings. No scheduler.
-- `expireHolds` flushes before the seat check, because that check is plain SQL and Hibernate's automatic flush does not cover it.
-- If a write fails after releasing holds (e.g. 409), the release is rolled back with it; harmless, since reads already treat those holds as free and the next successful write releases them.
-- Confirm: CONFIRMED → 200 unchanged (also with the flag off); CANCELLED → 409 `BOOKING_NOT_CONFIRMABLE`; EXPIRED (or overdue) → 409 `HOLD_EXPIRED`; departed flight → 409 `FLIGHT_NOT_BOOKABLE`. Cancel of an EXPIRED booking → 200 unchanged.
-- `hold_expires_at` is kept after a hold ends as a record; the API shows `holdExpiresAt` only while HELD. The expiry is rounded down to whole seconds (it is shown to customers; PostgreSQL keeps microseconds). V3's comment "set only while HELD" is left as written (applied migration); the design docs were reworded.
-- Tests: `MutableClock` replaces the fixed test clock (reset before every test); flag-on tests run in their own Spring context. The confirm-vs-expiry race test uses the clock as its oracle: just before expiry the confirmation always wins, just after the other customer always wins, in whichever order the threads reach the lock (20 rounds). `SeatHoldTest` and both concurrency classes passed 5 runs in a row.
-- Smoke-tested in Docker with the flag on (`AIRLINE_SEAT_HOLD_ENABLED=true` via `docker compose run`): HELD → confirm → CONFIRMED; and with the default (flag off): CONFIRMED, no `holdExpiresAt`.
-
-## Phase 6 – Cross-cutting
-- Every error, framework errors included, is a ProblemDetail with `status`, `title`, `detail`, `code` and `requestId`; `ErrorContractTest` checks all 21 reachable codes/variants (with the seat hold off; `HOLD_EXPIRED` in `SeatHoldTest`) and that bodies never contain exception, class, SQL or constraint names.
-- Framework `detail`: Spring's text is kept when present and safe; ours replaces it when missing, for unknown paths ("No endpoint matches this path" instead of "No static resource"), and for malformed JSON (our text plus the field path from Jackson, e.g. `daysOfOperation[2]`).
-- Unique-constraint violations are mapped by Hibernate's constraint name: `uq_active_seat` → 409 `SEAT_UNAVAILABLE`, `uq_schedule_flight_number` → 409 `DUPLICATE_FLIGHT_NUMBER`, anything else → 500. The name is logged, never returned. Unit-tested on the handler; over HTTP the duplicate-flight-number race (10 threads) always yields one 201 and nine 409s, never a 500.
-- Lock timeout (`PessimisticLockingFailureException`) → 503 `LOCK_TIMEOUT` with `Retry-After: 1`; tested by holding the flight row lock in another transaction (the booking fails after the 3 s `lock_timeout`, then succeeds once the lock is free).
-- Logging: 4xx and 503 at WARN on one line (method, path, code, detail); other 5xx at ERROR with stack trace. Every line carries `[requestId]` via `logging.pattern.level`; lines outside a request show `[]`.
-- Incoming `X-Request-Id` is accepted only if it matches `^[A-Za-z0-9._-]{1,64}$`; otherwise a UUID is generated (prevents log injection).
-- ArchUnit 1.4.1 (test scope), three rules: controllers do not access repositories (anything in `..persistence..` or any Spring Data `Repository`); `..api..` is not used by service, domain or persistence; no cycles between feature packages.
-
-## Phase 7 – Hardening
-- Edge cases covered through the API (`EdgeCasesTest`): the last day of the window (today + 365) is searchable and bookable, today + 366 is rejected; an overnight flight shows next-day arrival and is bookable; a schedule created late in the day generates today's (already departed) instance, which search hides and booking rejects; the last free seat can be booked, after which the flight shows 0 available and a further booking is a 409; a request including taken seats books nothing.
-- A full flight stays in search results with `availableSeats: 0` (hiding it would be filtering beyond the brief).
-- The end-to-end smoke test is committed as `scripts/smoke-test.sh`: bash and curl only, the date computed (next Monday at least a day ahead), PASS/FAIL per step, non-zero exit at the first failure; it needs a fresh database. Run with `bash scripts/smoke-test.sh` (git does not record the executable bit here, `core.filemode=false`).
-- `./mvnw clean verify` passed three times in a row (298 tests, about 40 s each); the smoke test passed all 10 checks on a fresh Compose stack, and failed cleanly (exit 1 at step 1) when re-run on a used database.
-
-## Phase 8 – Documentation
-- README follows the brief's required sections (setup with dependencies/build/run/database initialization, design decisions, search, booking and cancellation algorithms, assumptions), plus API walkthrough, design principles and patterns, scaling and evolution (including a multiple-airlines summary), testing approach, repository layout and an AI-assistance note.
-- Six decision records in `docs/adr/` (instances, concurrency, seat hold, package by feature, no authentication, PostgreSQL and engine-specific features).
-- `db/schema.sql` stays the commented snapshot rather than raw `pg_dump` output (which drops the comments); it was re-verified identical to a migrated database (`pg_dump --schema-only`, 45 CREATE/ALTER statements).
-- `hld/architecture.pdf` generated with md-to-pdf, pointed at the headless Chrome already installed for the diagrams (16 pages, the 5 diagrams embedded).
-- Every relative link and anchor in README, HLD, LLD and ADRs resolves (44 checked); every README command was executed as written (Compose run, developer run, seat-hold run, smoke test, build).
-- Fresh-clone check (commit 8f30441, cloned into an empty folder): no private files present; `docker compose up --build` → health UP, Swagger 200; `bash scripts/smoke-test.sh` → all checks pass; `./mvnw verify` → 298 tests green.
-- The fresh-clone check found that git stored `mvnw` (and the smoke script) without the executable bit (`core.filemode=false` on Windows). On Linux/macOS that breaks `./mvnw` and the Docker image build (reproduced: exit 126). Fixed in the Dockerfile with `chmod +x mvnw` before first use (verified with a mode-644 build context), and the executable bit is recorded in git with `git update-index --chmod=+x`.
-
-## Configurable booking window (after Phase 8)
-- The booking window was already the property `airline.booking-window-days`; it is now the single definition of the window (`AirlineProperties.lastBookableDate(today)`), used by instance generation, search **and booking**. Booking a flight dated beyond the window gives 400 `OUTSIDE_BOOKING_WINDOW`, so shortening the window takes effect at once even for instances generated earlier; lengthening it takes effect at the next startup or daily job.
-- No "365" remains in code text (Swagger summaries, Javadoc); they name the property instead.
-- `Retry-After` for 503 responses is configuration: `airline.retry-after` (default `PT1S`; first added as `airline.lock-retry-after`, renamed in 9.3 when a second 503 used it).
-- `docker-compose.yml` passes the `AIRLINE_*` variables through when set in the shell or a `.env` file (unset ones keep the `application.yml` default). Verified: `AIRLINE_BOOKING_WINDOW_DAYS=30 docker compose up` generates 31 instances per daily schedule and refuses day 31; the default run generates 366.
-- Environment variable names: the `AIRLINE_*` underscore form works (verified in Docker); for the Hikari lock timeout only the documented form `SPRING_DATASOURCE_HIKARI_CONNECTIONINITSQL` binds (the underscore form fails at startup) — verified via Hikari's config log.
-- Kept in code on purpose: seat, flight-number and reference formats, row limits (they mirror column sizes and constraints, so changing them needs a migration), the request-id safety pattern, and internal limits (JDBC batch size, reference retry count).
-
-## Manual trigger for instance generation (after Phase 8)
-- `POST /api/v1/admin/instance-window/extend` → 200 `{"inserted": n, "windowEnd": date}` runs the same top-up as the daily job, on demand (e.g. after lengthening the window or after downtime past midnight). It is a separate `AdminInstanceWindowController` in `schedule.api` because it concerns the whole window, not one schedule.
-- `ScheduleService.extendInstanceWindow()` now returns `InstanceWindowResult(inserted, windowEnd)`; the job ignores the value and the log line now includes `windowEnd`.
-- 200, not 201/202: nothing addressable is created and the work completes synchronously.
-- Safe to call repeatedly or while the daily job runs: each date is inserted once (unique `(schedule_id, flight_date)` + `ON CONFLICT DO NOTHING`); no new locking. Unauthenticated like every admin endpoint (ADR 0005).
-- Generation therefore has four triggers: schedule creation (same transaction), startup, the daily cron, and this endpoint.
-
-## Booking-reference clash → retryable 503 (after Phase 8)
-- References stay random (`SecureRandom`) rather than sequential: the reference alone opens and cancels a booking, so sequential codes would be enumerable. Uniqueness is guaranteed by the `uq_booking_reference` constraint; `existsByReference` (up to 5 draws) only avoids clashes with committed bookings.
-- Two bookings on different flights (no shared lock) drawing the same code at the same moment: the second insert violates `uq_booking_reference`, the transaction rolls back (nothing booked), and the handler now answers 503 `RETRY_LATER` with `Retry-After` instead of 500. All 5 draws taken (only plausible with hundreds of millions of bookings) gives the same 503.
-- `RETRY_LATER` is a generic "temporary, nothing changed, retry" code; logged at WARN with the constraint name, which is never returned.
-- `airline.lock-retry-after` renamed `airline.retry-after` (not yet committed when renamed): one Retry-After setting for both 503s (`LOCK_TIMEOUT`, `RETRY_LATER`).
-- Tested deterministically through HTTP (`BookingReferenceClashTest`): a fixed generator plus a check made to miss, as in the race, so the real constraint rejects the second booking → 503, nothing stored; and the exhausted-draws path → 503. Handler unit test for the mapping.
-- Not built: a keyed permutation of a sequence (unique by construction and unpredictable); recorded as the alternative.
-
-## Job-run id in the logs (after Phase 8)
-- Each run of `InstanceWindowJob` puts its own id in the logging context (`job-startup-xxxxxxxx`, `job-daily-xxxxxxxx`) under the same key as the HTTP request id, so the existing log pattern shows it and the lines of one run can be grouped; it is removed in `finally`. The manual endpoint keeps its HTTP request id. This is request correlation, not tracing: no new dependency.
-- Distributed tracing is deliberately not built (one service, one database); it is documented as a scaling step with its trigger (a second service or asynchronous messaging).
-
-## Final documentation pass
-- README, HLD, LLD and ADR 0005 updated for the Phase 9 enhancements (configurable window, manual instance-window endpoint, retryable reference clash, job-run ids); README and HLD "Scaling and evolution" gain distributed tracing and a cluster-wide job lock, each with its trigger. ADR 0005 records why references are random rather than sequential and the keyed-permutation alternative.
-- Checks: configuration table matches `application.yml` and the Compose pass-through (6 settings); 46 links and anchors resolve; no private references in tracked files; no stale setting names or test counts; HLD PDF regenerated (17 pages, 5 diagrams).
+## Testing and tooling
+- Integration tests share one Spring context and one Testcontainers PostgreSQL, truncate tables before each test, use a resettable test clock, and never run inside a test transaction.
+- The single-seat race test was shown failing with the lock and index removed (10 of 50 succeeded) before passing with them (exactly 1); recorded in ADR 0002.
+- Flag-on tests run in their own context; the confirm-vs-expiry race uses the clock as its oracle.
+- The smoke test (`scripts/smoke-test.sh`) needs only bash and curl, with portable `sed -E` and `date`.
+- The image runs as an unprivileged user with a `HEALTHCHECK`; `chmod +x mvnw` in the Dockerfile keeps the build independent of the executable bit.

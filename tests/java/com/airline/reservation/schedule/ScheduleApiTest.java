@@ -45,22 +45,22 @@ class ScheduleApiTest extends IntegrationTest {
 				.andExpect(jsonPath("$.arrivalTime").value("13:45"))
 				.andExpect(jsonPath("$.aircraftId").value(1))
 				.andExpect(jsonPath("$.daysOfOperation", contains("MONDAY", "WEDNESDAY", "FRIDAY")))
-				.andExpect(jsonPath("$.generatedInstances").value(157));
+				.andExpect(jsonPath("$.generatedInstances").value(158));
 
-		assertThat(count("SELECT COUNT(*) FROM flight_instance")).isEqualTo(157);
+		assertThat(count("SELECT COUNT(*) FROM flight_instance")).isEqualTo(158);
 		// ISO day of week: 1 = Monday, 3 = Wednesday, 5 = Friday
 		assertThat(count("SELECT COUNT(*) FROM flight_instance WHERE EXTRACT(ISODOW FROM flight_date) NOT IN (1, 3, 5)"))
 				.isZero();
 		assertThat(jdbcTemplate.queryForObject("SELECT MIN(flight_date) FROM flight_instance", LocalDate.class))
 				.isEqualTo(LocalDate.of(2026, 1, 5));
 		assertThat(jdbcTemplate.queryForObject("SELECT MAX(flight_date) FROM flight_instance", LocalDate.class))
-				.isEqualTo(LocalDate.of(2027, 1, 4));
+				.isEqualTo(LocalDate.of(2027, 1, 6)); // one day past the window, see ScheduleService
 		assertThat(count("""
 				SELECT COUNT(*) FROM flight_instance
 				WHERE departure_at = (flight_date + TIME '09:30') AT TIME ZONE 'UTC'
 				  AND arrival_at = (flight_date + TIME '13:45') AT TIME ZONE 'UTC'
 				  AND total_seats = 180 AND available_seats = 180
-				""")).isEqualTo(157);
+				""")).isEqualTo(158);
 	}
 
 	@Test
@@ -89,7 +89,7 @@ class ScheduleApiTest extends IntegrationTest {
 		assertThat(count("""
 				SELECT COUNT(*) FROM flight_instance
 				WHERE arrival_at = (flight_date + 1 + TIME '02:15') AT TIME ZONE 'UTC'
-				""")).isEqualTo(157);
+				""")).isEqualTo(158);
 	}
 
 	@Test
