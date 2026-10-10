@@ -719,6 +719,25 @@ coordination outside this system), and aircraft-rotation clashes (see the table 
 353 tests, all run by `./mvnw verify`. Integration tests use PostgreSQL 16 in Testcontainers with
 the real Flyway migrations. No H2, and no test runs inside a test transaction.
 
+The strategy, in six rules:
+1. **Test-first for the logic that can be wrong quietly**: flight-date generation, seat layout,
+   status transitions, hold expiry, the request fingerprint, and the seat race. Each test was
+   written and seen failing before the code that makes it pass.
+2. **The real database, always.** Every integration test runs against PostgreSQL 16 with the
+   real migrations, because the guarantees under test (row lock, partial unique index, check
+   constraints, `lock_timeout`) are database behaviour. H2 would test a different system.
+3. **No test transactions.** Tests see committed data, the same way concurrent requests do;
+   tables are truncated before each test instead. The concurrency tests could not work otherwise.
+4. **Time is injected.** A resettable test clock (fixed at 2026-01-05) drives window ends,
+   departures and hold expiry; no test sleeps or depends on the wall clock.
+5. **Both configurations.** The default context runs with the seat hold off (the brief's
+   behaviour); `SeatHoldTest` and `BookingWindowConfigTest` start their own contexts with the
+   flag on and a 30-day window. Every error code is checked for the same response shape.
+6. **Tiers above unit and integration are tools, not JUnit**: `ArchitectureTest` (ArchUnit)
+   guards the layering; `scripts/smoke-test.sh` verifies a deployed stack end to end; the load
+   test measures throughput, latency and the inventory invariant on a throwaway stack. What is
+   measured is reported with the caveat that it was measured on one machine.
+
 | Kind | What it proves | Classes |
 | --- | --- | --- |
 | Unit, test-first | Seat layout (labels, order, validity); instance generation (operating days only, both window ends, leap day, overnight); booking status transitions (full table); booking and hold behaviour; validators; reference format | `SeatLayoutTest`, `FlightInstanceGeneratorTest`, `FlightScheduleTest`, `BookingStatusTest`, `BookingTest`, `BookingHoldTest`, `FlightInstanceTest`, `BookingRequestValidatorTest`, `PnrGeneratorTest`, policy tests |
