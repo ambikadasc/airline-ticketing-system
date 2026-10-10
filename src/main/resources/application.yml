@@ -1,5 +1,9 @@
 server:
   port: 8080
+  # On SIGTERM (a deploy, a scale-down) stop accepting new requests and let the ones in flight
+  # finish, up to spring.lifecycle.timeout-per-shutdown-phase (30 s by default). A booking in
+  # progress therefore completes or rolls back; it is never cut off mid-transaction.
+  shutdown: graceful
 
 spring:
   application:

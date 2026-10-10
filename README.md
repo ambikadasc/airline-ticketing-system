@@ -528,6 +528,7 @@ immediately, and the history stays. The seats go back to the flight's counter.
 | Defence in depth | Service checks first; database constraints (unique, check, partial index) as the last guard, mapped to clean 409s | No reliance on application code alone for correctness |
 | Testability via injected time | `Clock` bean; tests use a controllable clock | No `Instant.now()` in business code |
 | Fail fast | `lock_timeout` → 503 with `Retry-After`; validation before the transaction | No unbounded waiting on locks |
+| Graceful shutdown | `server.shutdown: graceful`: on SIGTERM (deploy, scale-down) new requests are refused and in-flight ones finish, so a booking completes or rolls back, never half-way | No custom shutdown hooks: the platform setting is enough |
 | Factory via configuration | `BookingPolicyConfig` chooses the `BookingPolicy` implementation once from `airline.seat-hold.enabled`; the service never looks at the flag | No abstract factory, no registry: two products, one switch |
 | Interceptor | `BookingLookupThrottle` (`HandlerInterceptor`) guards the reference endpoints by route; `BookingWebConfig` registers it | Not a servlet filter: a filter matches paths by string and can be bypassed by path variants |
 | Filter chain | `RequestIdFilter` puts a request id on every request, response and log line | No tracing framework for a single service |

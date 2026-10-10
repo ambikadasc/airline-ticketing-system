@@ -83,6 +83,7 @@ ones, with the alternatives that were rejected, is in `hld/architecture.md` (sec
 - The single-seat race test was shown failing with the lock and index removed (10 of 50 succeeded) before passing with them (exactly 1); recorded in ADR 0002.
 - Flag-on tests run in their own context; the confirm-vs-expiry race uses the clock as its oracle.
 - The smoke test (`scripts/smoke-test.sh`) needs only bash and curl, with portable `sed -E` and `date`.
+- `server.shutdown: graceful`, so a deploy or scale-down lets in-flight bookings finish (commit or roll back) before the process exits; Compose and Kubernetes both send SIGTERM first.
 - The image runs as an unprivileged user with a `HEALTHCHECK`; `chmod +x mvnw` in the Dockerfile keeps the build independent of the executable bit.
 - Load testing runs only on a separate Compose project (`airline-load`: own containers, network and database volume) seeded by SQL (`load/seed.sql`) and removed by `down -v`: isolation instead of cleanup, so the working database is never touched and no delete endpoints are needed for test hygiene. The smoke test keeps running against the working stack, which is what it verifies.
 - JMeter (`load/airline-load.jmx`, run from the `alpine/jmeter` image) rather than k6 or Gatling: the widely used standard with a ready HTML report and nothing to install; the code-first tools are the alternative when load scripts should live in version control as code.
