@@ -238,14 +238,24 @@ Watch it with Hikari's metrics, which Spring Boot registers automatically:
 
 **Measured.** `scripts/load-test.sh` runs JMeter against a throwaway copy of the stack (a
 separate Compose project, seeded by SQL, removed afterwards; the README's "Load test" and
-"Measured" sections have the procedure and the full table). On one laptop, 60 threads for 60 s
-(20 search, 10 lookup, 10 bookings across all flights, 20 bookings on one flight) against the
-pool of 10: about 2,300 requests/s in total, p95 ≤ 52 ms in every scenario, no 5xx, no
-`LOCK_TIMEOUT`, no pool-wait timeout, and the same figures with 100k and with 1M bookings in the
-database, because the hot queries are index lookups (query plans in LLD §11). The hot flight, where
-all 20 writers queue on one row lock, answers in 28 ms at p50: the lock is held for milliseconds
-per booking. Relative numbers (client, application and database on one machine), useful for the
-shape, not for capacity planning.
+"Measured" sections have the procedure and the full table). On one laptop, 65 threads for 60 s
+(20 search, 10 lookup, 5 cancellations, 10 bookings across all flights, 20 bookings on one
+flight) against the pool of 10: about 2,300 requests/s in total, p95 ≤ 58 ms in every steady
+scenario, no 5xx, no `LOCK_TIMEOUT`, no pool-wait timeout, and the same shape with 100k and
+with 1M bookings in the database, because the hot queries are index lookups (query plans in
+LLD §11). Responses are counted by status and by error code, so every refusal has its reason
+(27 % of random bookings → 409 `SEAT_UNAVAILABLE`, the seat was taken). Cancellations released
+seats on random flights under the booking traffic and the availability counter matched the seat
+rows on every flight afterwards. The hot flight, where all 20 writers queue on one row lock,
+answers in 29 ms at p50: the lock is held for milliseconds per booking. Five customers picking
+the same seat in the same instant end
+with exactly one 201 and four 409s, one active booking for the seat, the counter intact: the
+guarantee of this section observed over HTTP under load, not only in the JUnit race test. In a separate throttle run, two clients guessing references get ten 404s and then only 429
+`RATE_LIMITED` (60,000 refusals in 20 s at p50 0 ms), refused before any database work. In one
+load run a PostgreSQL checkpoint stalled I/O for about 6 s: 0.15 % of requests
+got 503 `RETRY_LATER` within the 2 s connection bound and nothing else was affected, which is
+the fail-fast behaviour described above, seen for real. Relative numbers (client, application and
+database on one machine), useful for the shape, not for capacity planning.
 
 | Alternative | Why not |
 | --- | --- |

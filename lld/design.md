@@ -464,7 +464,7 @@ on tests (they must see committed data).
 | Concurrency | `BookingConcurrencyTest`, `CancellationConcurrencyTest`, `DuplicateFlightNumberRaceTest` (helpers in `ConcurrencySupport`) | 50 threads on one seat → exactly 1 success; 50 seats; overlapping 1A+1B vs 1B+1C; 10 concurrent cancels; cancel vs book; duplicate flight number never 500. After each: counter invariant and no seat taken twice. Shown to fail with the lock and index removed (10 of 50 succeeded) |
 | Seat hold on | `SeatHoldTest` (own context, `airline.seat-hold.enabled=true`) | Hold → confirm; expiry frees seats for the next customer; confirm after expiry → 409; confirm-vs-expiry race decided by the clock |
 | Architecture | `ArchitectureTest` (ArchUnit) | Controllers do not access repositories; `..api..` not used by service/domain/persistence; no cycles between feature packages |
-| Load (a tool, not a test) | `scripts/load-test.sh`, `load/seed.sql`, `load/airline-load.jmx` | Seeded JMeter run on a separate throwaway stack: throughput and percentiles per scenario, response codes, inventory invariant after the run (README "Load test" and "Measured") |
+| Load (a tool, not a test) | `scripts/load-test.sh`, `load/seed.sql`, `load/airline-load.jmx` | Seeded JMeter run on a separate throwaway stack: search, lookup, cancel, spread and hot-flight bookings, a same-seat burst (exactly one 201), reference guessing (10 × 404 then 429); throughput and p50/p90/p95/p99 per scenario, responses counted by status and error code, inventory invariant after the run (README "Load test" and "Measured") |
 
 ## 11. Query plans at scale
 

@@ -97,6 +97,10 @@ SET available_seats = total_seats - (SELECT count(*) FROM booking_seat bs
                                      WHERE bs.flight_instance_id = i.id AND bs.status IN ('ACTIVE', 'HELD'));
 
 ANALYZE;
+-- The bulk load above writes ~0.5 GB of WAL in a minute; flush it now rather than letting the
+-- checkpoint fall into the measured window (observed once: an 8 s checkpoint during the run made
+-- 181 requests wait more than 2 s for a connection and get 503 RETRY_LATER).
+CHECKPOINT;
 
 SELECT 'schedules' AS "table", count(*) FROM flight_schedule
 UNION ALL SELECT 'flight instances', count(*) FROM flight_instance

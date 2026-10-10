@@ -1,14 +1,20 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  JMeter test plan for the reservation API. Four thread groups, each sized by a property so 0
+  JMeter test plan for the reservation API. Seven thread groups, each sized by a property so 0
   disables it; run headless by scripts/load-test.sh:
-    jmeter -n -t airline-load.jmx -Jhost=app -Jport=8080 -Jduration=60
-           -Jsearch_threads=20 -Jlookup_threads=10 -Jbooking_threads=10 -Jhot_threads=20
+    jmeter -n -t airline-load.jmx -Jhost=app -Jport=8080 -Jduration=60 -Jsample_variables=code
+           -Jsearch_threads=20 -Jlookup_threads=10 -Jcancel_threads=5 -Jbooking_threads=10 -Jhot_threads=20
            -Jinstances=<max flight_instance id> -Jhot_flight=<one flight_instance id>
+           -Jrace_threads=5 -Jrace_flight=<another flight_instance id> -Jrace_seat=30F
+           -Jguess_threads=2
   Inputs written by the seed step: /results/routes.csv (origin,destination) and /results/refs.csv
   (one booking reference per line).
-  Every sampler asserts a 200, 201 or 409 response (409 SEAT_UNAVAILABLE is expected when a
-  random seat is already taken); anything else, including 503s, is counted as a failure.
+  The machine-readable error code of every response ($.code, "none" for a success) is extracted
+  into the variable "code" and copied into the sample's response message. Any 2xx or 4xx is a
+  business answer (409 seat taken, 404 unknown reference, 429 throttled) and passes the
+  assertion, so JMeter's pass/fail pie and Errors table show 5xx only, named by code
+  (e.g. 503/RETRY_LATER). With -Jsample_variables=code the code is also the last column of the
+  .jtl; scripts/load-test.sh turns it into the per-scenario outcome summary and outcomes.html.
 -->
 <jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
   <hashTree>
@@ -45,15 +51,33 @@
       </HeaderManager>
       <hashTree/>
 
-      <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="200, 201 or 409 only">
+      <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="error code">
+        <stringProp name="JSONPostProcessor.referenceNames">code</stringProp>
+        <stringProp name="JSONPostProcessor.jsonPathExprs">$.code</stringProp>
+        <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+        <stringProp name="JSONPostProcessor.defaultValues">none</stringProp>
+      </JSONPostProcessor>
+      <hashTree/>
+
+      <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="2xx or 4xx only (5xx is a failure)">
         <collectionProp name="Asserion.test_strings">
-          <stringProp name="ok">^(200|201|409)$</stringProp>
+          <stringProp name="ok">^[24][0-9][0-9]$</stringProp>
         </collectionProp>
         <stringProp name="Assertion.custom_message"></stringProp>
         <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
         <boolProp name="Assertion.assume_success">true</boolProp>
         <intProp name="Assertion.test_type">1</intProp>
       </ResponseAssertion>
+      <hashTree/>
+
+      <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="error code as response message">
+        <stringProp name="scriptLanguage">groovy</stringProp>
+        <stringProp name="cacheKey">true</stringProp>
+        <stringProp name="filename"></stringProp>
+        <stringProp name="parameters"></stringProp>
+        <stringProp name="script">String code = vars.get("code")
+if (code != null &amp;&amp; code != "none") { prev.setResponseMessage(code) }</stringProp>
+      </JSR223PostProcessor>
       <hashTree/>
 
       <!-- Search: a random route among the seeded ones, a random date in the next 60 days -->
@@ -130,6 +154,44 @@
         <hashTree/>
       </hashTree>
 
+      <!-- Cancel: seeded references, so seats are released on random flights while the booking
+           groups write to them; a second cancel of the same reference is idempotent (200) -->
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="cancel">
+        <stringProp name="ThreadGroup.num_threads">${__P(cancel_threads,0)}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">2</stringProp>
+        <boolProp name="ThreadGroup.scheduler">true</boolProp>
+        <stringProp name="ThreadGroup.duration">${__P(duration,60)}</stringProp>
+        <stringProp name="ThreadGroup.delay">0</stringProp>
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <intProp name="LoopController.loops">-1</intProp>
+        </elementProp>
+      </ThreadGroup>
+      <hashTree>
+        <CSVDataSet guiclass="TestBeanGUI" testclass="CSVDataSet" testname="references to cancel">
+          <stringProp name="filename">/results/refs.csv</stringProp>
+          <stringProp name="fileEncoding">UTF-8</stringProp>
+          <stringProp name="variableNames">ref</stringProp>
+          <boolProp name="ignoreFirstLine">false</boolProp>
+          <stringProp name="delimiter">,</stringProp>
+          <boolProp name="quotedData">false</boolProp>
+          <boolProp name="recycle">true</boolProp>
+          <boolProp name="stopThread">false</boolProp>
+          <stringProp name="shareMode">shareMode.group</stringProp>
+        </CSVDataSet>
+        <hashTree/>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="cancel">
+          <stringProp name="HTTPSampler.method">POST</stringProp>
+          <stringProp name="HTTPSampler.path">/api/v1/bookings/${ref}/cancel</stringProp>
+          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+            <collectionProp name="Arguments.arguments"/>
+          </elementProp>
+        </HTTPSamplerProxy>
+        <hashTree/>
+      </hashTree>
+
       <!-- Booking, spread: one random seat on a random flight; 409 when the seat is already taken -->
       <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="booking">
         <stringProp name="ThreadGroup.num_threads">${__P(booking_threads,0)}</stringProp>
@@ -154,6 +216,65 @@
               <elementProp name="" elementType="HTTPArgument">
                 <boolProp name="HTTPArgument.always_encode">false</boolProp>
                 <stringProp name="Argument.value">{"flightInstanceId": ${__Random(1,${__P(instances,1)})}, "passengers": [{"name": "Load Passenger", "seatNumber": "${__Random(1,30)}${__RandomString(1,ABCDEF)}"}]}</stringProp>
+                <stringProp name="Argument.metadata">=</stringProp>
+              </elementProp>
+            </collectionProp>
+          </elementProp>
+        </HTTPSamplerProxy>
+        <hashTree/>
+      </hashTree>
+
+      <!-- Guessing references: random 6-character references, every one a miss. Starts after the
+           steady groups have finished because all JMeter threads share one IP address and the
+           throttle is per client: a guesser would get the legitimate lookups and cancels from the
+           same address throttled too (the NAT caveat of ADR 0005). Expected: 10 x 404, then 429. -->
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="guess">
+        <stringProp name="ThreadGroup.num_threads">${__P(guess_threads,0)}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">0</stringProp>
+        <boolProp name="ThreadGroup.scheduler">true</boolProp>
+        <stringProp name="ThreadGroup.delay">${__P(duration,60)}</stringProp>
+        <stringProp name="ThreadGroup.duration">20</stringProp>
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <intProp name="LoopController.loops">-1</intProp>
+        </elementProp>
+      </ThreadGroup>
+      <hashTree>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="guess">
+          <stringProp name="HTTPSampler.method">GET</stringProp>
+          <stringProp name="HTTPSampler.path">/api/v1/bookings/${__RandomString(6,ABCDEFGHJKLMNPQRSTUVWXYZ23456789)}</stringProp>
+          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+            <collectionProp name="Arguments.arguments"/>
+          </elementProp>
+        </HTTPSamplerProxy>
+        <hashTree/>
+      </hashTree>
+
+      <!-- Booking, race: race_threads customers pick the same seat on the same flight in the same
+           instant, one request each. Exactly one must get 201; the others 409 SEAT_UNAVAILABLE. -->
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="booking-race">
+        <stringProp name="ThreadGroup.num_threads">${__P(race_threads,0)}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">0</stringProp>
+        <boolProp name="ThreadGroup.scheduler">false</boolProp>
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <stringProp name="LoopController.loops">1</stringProp>
+        </elementProp>
+      </ThreadGroup>
+      <hashTree>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="booking-race">
+          <stringProp name="HTTPSampler.method">POST</stringProp>
+          <stringProp name="HTTPSampler.path">/api/v1/bookings</stringProp>
+          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+          <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+            <collectionProp name="Arguments.arguments">
+              <elementProp name="" elementType="HTTPArgument">
+                <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                <stringProp name="Argument.value">{"flightInstanceId": ${__P(race_flight,1)}, "passengers": [{"name": "Race Passenger", "seatNumber": "${__P(race_seat,30F)}"}]}</stringProp>
                 <stringProp name="Argument.metadata">=</stringProp>
               </elementProp>
             </collectionProp>
