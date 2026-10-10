@@ -446,3 +446,4 @@ The brief is single-airline, but no part of the design depends on it.
 | 2026-10-09 | Phase 12: unsuccessful booking lookups throttled per client (429 `RATE_LIMITED`, §4.6, §9); write-side backpressure recorded as a later step introduced as load requires (§6, §11) |
 | 2026-10-09 | Phase 13: load test on a throwaway stack (JMeter, SQL seed) and the measured figures (§6); query plans at 1M bookings (LLD §11); Swagger demo walkthrough (README) |
 | 2026-10-10 | Phase 14: optional `Idempotency-Key` on booking creation, stored on the booking and checked under the flight lock (§4.4, §9, ADR 0007); V6 adds the columns and the partial unique index |
+| 2026-10-10 | Simplification pass: error subclasses folded into `ApiException`, the request fingerprint into `BookingService`; no behaviour or schema change (353 tests, smoke, load and throttle runs unchanged) |

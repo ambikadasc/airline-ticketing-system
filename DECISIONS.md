@@ -75,7 +75,7 @@ ones, with the alternatives that were rejected, is in `hld/architecture.md` (sec
 - Package by feature, layered inside; dependencies run `booking → flight → aircraft, airport` and `schedule → flight, aircraft, airport`; enforced by three ArchUnit rules (ADR 0004).
 - JPA entities are the domain model, with behaviour and an enum state machine; no public status setters.
 - Services return `*Result` records used directly as response bodies; request records map to `*Command` records.
-- `ApiException` is one concrete class carrying an `ErrorCode`; subclasses only where a response carries extra fields.
+- `ApiException` is one concrete class carrying an `ErrorCode`, a detail and, when a response needs them, extra body fields (`unavailableSeats`, `invalidSeats`) passed to the constructor; no subclasses.
 - Read-only reference data uses Spring Data's bare `Repository` with finders only.
 
 ## Testing and tooling

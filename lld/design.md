@@ -14,7 +14,7 @@ com.airline.reservation
 ├── AirlineReservationApplication      main(): TimeZone UTC, @EnableScheduling
 ├── common/
 │   ├── config/       ClockConfig, AirlineProperties
-│   ├── error/        ApiException (+ subclasses that carry extra fields), ErrorCode, GlobalExceptionHandler
+│   ├── error/        ApiException (code, detail, optional extra body fields), ErrorCode, GlobalExceptionHandler
 │   └── logging/      RequestIdFilter
 ├── airport/          Airport, AirportRepository
 ├── aircraft/         Aircraft, SeatLayout, AircraftRepository
