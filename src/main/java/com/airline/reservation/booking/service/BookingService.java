@@ -1,9 +1,14 @@
 package com.airline.reservation.booking.service;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.slf4j.Logger;
@@ -79,7 +84,7 @@ public class BookingService {
 		// the flight lock: a concurrent retry carries the same flight id, so it waits here and then
 		// sees the first attempt's committed row instead of booking the seats a second time.
 		String requestHash = command.idempotencyKey() == null ? null
-				: RequestFingerprint.of(command.flightInstanceId(), passengers);
+				: fingerprint(command.flightInstanceId(), passengers);
 		if (requestHash != null) {
 			Booking earlier = bookingRepository.findWithSeatsByIdempotencyKey(command.idempotencyKey()).orElse(null);
 			if (earlier != null) {
@@ -105,14 +110,16 @@ public class BookingService {
 		SeatLayout layout = aircraftRepository.findById(flight.getAircraftId()).orElseThrow().seatLayout();
 		List<String> invalidSeats = requestedSeats.stream().filter(seat -> !layout.contains(seat)).toList();
 		if (!invalidSeats.isEmpty()) {
-			throw new InvalidSeatException(invalidSeats);
+			throw new ApiException(ErrorCode.INVALID_SEAT, "Seats not on this aircraft: " + String.join(", ", invalidSeats),
+					Map.of("invalidSeats", invalidSeats));
 		}
 
 		Set<String> taken = seatOccupancy.takenSeats(flight.getId(), now);
 		List<String> unavailableSeats = requestedSeats.stream().filter(taken::contains).toList();
 		if (!unavailableSeats.isEmpty()) {
 			log.info("Seat conflict: flightInstanceId={} seats={}", flight.getId(), unavailableSeats);
-			throw new SeatUnavailableException(unavailableSeats);
+			throw new ApiException(ErrorCode.SEAT_UNAVAILABLE, "Seats already booked: " + String.join(", ", unavailableSeats),
+					Map.of("unavailableSeats", unavailableSeats));
 		}
 
 		Booking booking = bookingPolicy.newBooking(newReference(), flight.getId(), passengers, now);
@@ -235,6 +242,26 @@ public class BookingService {
 		bookingRepository.flush();
 		log.info("Holds expired: flightInstanceId={} bookings={} seatsReleased={}", flight.getId(), overdue.size(),
 				released);
+	}
+
+	/**
+	 * Hex SHA-256 of a booking request (flight and passengers, after normalisation), stored with
+	 * the booking next to its Idempotency-Key. A repeated key with a different fingerprint is a
+	 * different request wearing the same key, and is refused. Every value is delimited so that
+	 * field boundaries cannot be confused.
+	 */
+	static String fingerprint(Long flightInstanceId, List<PassengerSeat> passengers) {
+		StringBuilder canonical = new StringBuilder().append(flightInstanceId).append('\n');
+		for (PassengerSeat passenger : passengers) {
+			canonical.append(passenger.seatNumber()).append('\u001F').append(passenger.name()).append('\n');
+		}
+		try {
+			MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
+			return HexFormat.of().formatHex(sha256.digest(canonical.toString().getBytes(StandardCharsets.UTF_8)));
+		}
+		catch (NoSuchAlgorithmException ex) {
+			throw new IllegalStateException("SHA-256 is part of every Java runtime", ex);
+		}
 	}
 
 	/** A new unused reference. The unique constraint on booking.reference is the final guard. */

@@ -177,10 +177,6 @@ public class Booking {
 		return cancelledAt;
 	}
 
-	public String getIdempotencyKey() {
-		return idempotencyKey;
-	}
-
 	public Long getId() {
 		return id;
 	}

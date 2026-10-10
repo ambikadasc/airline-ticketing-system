@@ -24,4 +24,5 @@ EXPOSE 8080
 # Reports healthy once Spring Boot's health endpoint answers UP (curl ships with the base image).
 HEALTHCHECK --interval=10s --timeout=3s --start-period=40s --retries=3 \
   CMD curl -fsS http://localhost:8080/actuator/health || exit 1
-ENTRYPOINT ["java", "-Duser.timezone=UTC", "-jar", "/app/app.jar"]
+# UTC is set by the application itself (main), so it holds for every launch mode, not only this one.
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]

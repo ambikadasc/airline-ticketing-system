@@ -19,7 +19,7 @@ sequenceDiagram
     S->>S: requested seats ∩ taken seats
     alt any requested seat taken
         S->>DB: ROLLBACK
-        S-->>API: SeatUnavailableException(seats)
+        S-->>API: ApiException SEAT_UNAVAILABLE (seats)
         API-->>C: 409 SEAT_UNAVAILABLE + unavailableSeats
     else all seats free
         S->>P: newBooking(...)

@@ -74,34 +74,30 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 	@ExceptionHandler(DataIntegrityViolationException.class)
 	ResponseEntity<ProblemDetail> handleDataIntegrity(DataIntegrityViolationException ex, HttpServletRequest request) {
 		String constraint = constraintName(ex);
-		ErrorCode code;
-		String detail;
-		if ("uq_active_seat".equals(constraint)) {
-			code = ErrorCode.SEAT_UNAVAILABLE;
-			detail = "One or more requested seats were just booked by another request";
-		}
-		else if ("uq_schedule_flight_number".equals(constraint)) {
-			code = ErrorCode.DUPLICATE_FLIGHT_NUMBER;
-			detail = "A schedule with this flight number already exists";
-		}
-		else if ("uq_booking_idempotency_key".equals(constraint)) {
-			// The same key arrived at the same moment for two different flights (different locks, so the
-			// service's lookup could not see the other). The loser's transaction rolled back.
-			code = ErrorCode.IDEMPOTENCY_KEY_REUSED;
-			detail = "This Idempotency-Key was just used by another booking request";
-		}
-		else if ("uq_booking_reference".equals(constraint)) {
-			// Two bookings drew the same random reference at the same moment (no shared lock between
-			// different flights). The transaction rolled back, so nothing was booked: tell the client
-			// to retry, which draws a new reference.
-			log.warn("{} {} -> {} (constraint {})", request.getMethod(), request.getRequestURI(),
-					ErrorCode.RETRY_LATER, constraint);
-			return retryLater(ErrorCode.RETRY_LATER, RETRY_LATER_DETAIL);
-		}
-		else {
+		ErrorCode code = switch (String.valueOf(constraint)) {
+			case "uq_active_seat" -> ErrorCode.SEAT_UNAVAILABLE;
+			case "uq_schedule_flight_number" -> ErrorCode.DUPLICATE_FLIGHT_NUMBER;
+			// The same key at the same moment for two different flights (different locks, so the
+			// service's lookup could not see the other); the loser's transaction rolled back.
+			case "uq_booking_idempotency_key" -> ErrorCode.IDEMPOTENCY_KEY_REUSED;
+			// Two bookings drew the same random reference at the same moment; nothing was booked,
+			// and a retry draws a new reference.
+			case "uq_booking_reference" -> ErrorCode.RETRY_LATER;
+			default -> null;
+		};
+		if (code == null) {
 			return handleUnexpected(ex, request);
 		}
 		log.warn("{} {} -> {} (constraint {})", request.getMethod(), request.getRequestURI(), code, constraint);
+		return switch (code) {
+			case SEAT_UNAVAILABLE -> problemResponse(code, "One or more requested seats were just booked by another request");
+			case DUPLICATE_FLIGHT_NUMBER -> problemResponse(code, "A schedule with this flight number already exists");
+			case IDEMPOTENCY_KEY_REUSED -> problemResponse(code, "This Idempotency-Key was just used by another booking request");
+			default -> retryLater(code, RETRY_LATER_DETAIL);
+		};
+	}
+
+	private static ResponseEntity<ProblemDetail> problemResponse(ErrorCode code, String detail) {
 		return ResponseEntity.status(code.status()).body(problem(code, detail));
 	}
 

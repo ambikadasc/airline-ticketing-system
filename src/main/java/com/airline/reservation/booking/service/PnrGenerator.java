@@ -1,6 +1,7 @@
 package com.airline.reservation.booking.service;
 
 import java.security.SecureRandom;
+import java.util.stream.Collectors;
 
 import org.springframework.stereotype.Component;
 
@@ -19,11 +20,9 @@ public class PnrGenerator {
 	private final SecureRandom random = new SecureRandom();
 
 	public String next() {
-		StringBuilder reference = new StringBuilder(LENGTH);
-		for (int i = 0; i < LENGTH; i++) {
-			reference.append(ALPHABET.charAt(random.nextInt(ALPHABET.length())));
-		}
-		return reference.toString();
+		return random.ints(LENGTH, 0, ALPHABET.length())
+				.mapToObj(i -> String.valueOf(ALPHABET.charAt(i)))
+				.collect(Collectors.joining());
 	}
 
 }

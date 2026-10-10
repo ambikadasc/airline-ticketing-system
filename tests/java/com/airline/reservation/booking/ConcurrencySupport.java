@@ -11,7 +11,6 @@ import java.util.concurrent.TimeUnit;
 
 import org.springframework.jdbc.core.JdbcTemplate;
 
-import com.airline.reservation.booking.service.SeatUnavailableException;
 import com.airline.reservation.common.error.ApiException;
 import com.airline.reservation.common.error.ErrorCode;
 
@@ -52,10 +51,10 @@ class ConcurrencySupport implements AutoCloseable {
 					task.call();
 					return Outcome.SUCCESS;
 				}
-				catch (SeatUnavailableException ex) {
-					return Outcome.SEAT_UNAVAILABLE;
-				}
 				catch (ApiException ex) {
+					if (ex.getCode() == ErrorCode.SEAT_UNAVAILABLE) {
+						return Outcome.SEAT_UNAVAILABLE;
+					}
 					if (ex.getCode() == ErrorCode.HOLD_EXPIRED) {
 						return Outcome.HOLD_EXPIRED;
 					}
