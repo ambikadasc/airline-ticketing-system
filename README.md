@@ -7,11 +7,35 @@ including under concurrent requests.
 **Stack:** Java 21 · Spring Boot 4.1 · PostgreSQL 16 · Flyway · JUnit 5 + Testcontainers ·
 Docker Compose
 
+## Start here
+
+```bash
+docker compose up --build -d        # PostgreSQL + the application on http://localhost:8080
+bash scripts/smoke-test.sh          # 14 end-to-end checks against the running stack, PASS/FAIL per step
+./mvnw verify                       # 353 tests on a real PostgreSQL (Testcontainers; needs Docker)
+```
+Then open http://localhost:8080/swagger-ui.html and follow the
+[demo walkthrough](#demo-walkthrough-swagger-ui): nine clicks from creating a schedule to the
+double-booking 409 and the lookup throttle. Stop with `docker compose down -v`.
+
+Reading order, if you have fifteen minutes:
+1. [Design Decisions](#design-decisions): the ten choices, one line each, with their records.
+2. [HLD §6 Concurrency strategy](hld/architecture.md#6-concurrency-strategy): the flight row lock
+   plus the partial unique index, why not the alternatives, what happens under overload.
+3. `BookingService.createBooking` ([source](src/main/java/com/airline/reservation/booking/service/BookingService.java)):
+   the one write path, lock first, every check under it.
+4. `BookingConcurrencyTest` ([source](tests/java/com/airline/reservation/booking/BookingConcurrencyTest.java)):
+   50 threads, one seat, exactly one booking, shown failing without the lock and index.
+5. [Measured](#measured): what the load test says at 100k and 1M bookings, and what it does not.
+
+Everything else (algorithms, assumptions, patterns, scaling, the load test itself, the ADRs) is
+reference material for the questions that follow.
+
 | Document | What it covers |
 | --- | --- |
 | [High-level design](hld/architecture.md) ([PDF](hld/architecture.pdf)) | Architecture, components, request flows, flight generation and concurrency strategies, decisions, assumptions, scaling |
 | [Low-level design](lld/design.md) | Packages, classes, API reference, validation, error catalogue, transaction boundaries, lock order |
-| [Decision records](docs/adr/) | Six ADRs: context, decision, alternatives, consequences, when to revisit |
+| [Decision records](docs/adr/) | Seven ADRs: context, decision, alternatives, consequences, when to revisit |
 | [Schema](db/schema.sql) · [migrations](db/migrations/) · [ER diagram](hld/diagrams/er.png) | Tables, keys, constraints, indexes |
 | [Decision log](DECISIONS.md) | Every smaller decision, one line each, by phase |
 | Swagger UI | http://localhost:8080/swagger-ui.html (while running) |
