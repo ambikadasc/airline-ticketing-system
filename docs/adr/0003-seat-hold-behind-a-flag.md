@@ -42,4 +42,8 @@ changing the behaviour the brief asks for.
 ## When to revisit
 - Holds must be released on flights that see no further writes, e.g. for reporting accuracy:
   add a small scheduled sweep.
-- Payment integration arrives: confirmation would be driven by the payment outcome.
+- Payment integration arrives: confirmation would be driven by the payment outcome. Size
+  `airline.seat-hold.ttl` above the payment flow's worst-case latency so that a slow gateway
+  rarely outlives the hold; when it does, the re-check under the flight lock on confirmation is
+  the backstop (409 `HOLD_EXPIRED`, nothing stored, the payment to be refunded by the caller),
+  so a seat that expired and was resold during a slow payment can never be confirmed twice.
