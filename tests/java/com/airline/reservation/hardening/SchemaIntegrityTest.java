@@ -16,8 +16,9 @@ import com.airline.reservation.schedule.service.ScheduleService;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Rules the database carries on its own (V5), independent of the application: a seat row cannot
- * name a different flight from its booking, and seat and flight numbers must be well-formed.
+ * Rules the database carries on its own (V5, V6), independent of the application: a seat row cannot
+ * name a different flight from its booking, seat and flight numbers must be well-formed, and an
+ * idempotency key creates at most one booking and always comes with its request hash.
  */
 class SchemaIntegrityTest extends IntegrationTest {
 
@@ -67,6 +68,31 @@ class SchemaIntegrityTest extends IntegrationTest {
 				"""))
 				.isInstanceOf(DataIntegrityViolationException.class)
 				.hasMessageContaining("chk_schedule_flight_number");
+	}
+
+	@Test
+	void anIdempotencyKeyWithoutItsRequestHashIsRejected() {
+		assertThatThrownBy(() -> insertBooking("KEYONL", "key-1", null))
+				.isInstanceOf(DataIntegrityViolationException.class)
+				.hasMessageContaining("chk_booking_idempotency");
+	}
+
+	@Test
+	void anIdempotencyKeyCanCreateOnlyOneBooking() {
+		insertBooking("KEYAAA", "key-1", "hash-1");
+		assertThatThrownBy(() -> insertBooking("KEYBBB", "key-1", "hash-1"))
+				.isInstanceOf(DataIntegrityViolationException.class)
+				.hasMessageContaining("uq_booking_idempotency_key");
+		// Bookings without a key never collide with each other.
+		insertBooking("KEYCCC", null, null);
+		insertBooking("KEYDDD", null, null);
+	}
+
+	private void insertBooking(String reference, String key, String hash) {
+		jdbcTemplate.update("""
+				INSERT INTO booking (reference, flight_instance_id, status, passenger_count, created_at, idempotency_key, request_hash)
+				VALUES (?, ?, 'CONFIRMED', 1, now(), ?, ?)
+				""", reference, flightA, key, hash);
 	}
 
 	private void insertSeat(long flight, String seat) {

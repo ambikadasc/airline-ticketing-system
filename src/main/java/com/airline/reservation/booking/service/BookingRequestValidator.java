@@ -26,6 +26,9 @@ public class BookingRequestValidator {
 	/** Row 1-99 without a leading zero, then one letter. */
 	private static final Pattern SEAT_NUMBER = Pattern.compile("^[1-9]\\d?[A-Z]$");
 
+	/** An Idempotency-Key as clients generate them (UUIDs, order numbers): 1-64 of letters, digits, '-' and '_'. */
+	private static final Pattern IDEMPOTENCY_KEY = Pattern.compile("^[A-Za-z0-9_-]{1,64}$");
+
 	private final AirlineProperties properties;
 
 	public BookingRequestValidator(AirlineProperties properties) {
@@ -34,11 +37,19 @@ public class BookingRequestValidator {
 
 	/** Returns the passengers with seat numbers trimmed and upper-cased. */
 	public List<PassengerSeat> validate(CreateBookingCommand command) {
+		validateIdempotencyKey(command.idempotencyKey());
 		validatePassengerCount(command.passengers());
 		List<PassengerSeat> passengers = normaliseSeatNumbers(command.passengers());
 		validateSeatFormat(passengers);
 		rejectDuplicateSeats(passengers);
 		return passengers;
+	}
+
+	/** The header is optional; when present it must be usable as a key (and short enough to store). */
+	private void validateIdempotencyKey(String key) {
+		if (key != null && !IDEMPOTENCY_KEY.matcher(key).matches()) {
+			throw invalid("Idempotency-Key must be 1-64 characters of letters, digits, '-' or '_'");
+		}
 	}
 
 	private void validatePassengerCount(List<PassengerSeat> passengers) {

@@ -28,6 +28,8 @@ ones, with the alternatives that were rejected, is in `hld/architecture.md` (sec
 - The maximum passengers per booking is configuration (`airline.max-seats-per-booking`), checked by `BookingRequestValidator`, which has one private method per rule; a rule list is the refactor path if rules grow.
 - `SeatLayout` is the only value object; seat numbers and references stay `String`, days stay `Set<DayOfWeek>`.
 - Booking a flight dated beyond the window returns 400 `OUTSIDE_BOOKING_WINDOW`, so shortening the window takes effect at once.
+- Optional `Idempotency-Key` on `POST /bookings`: stored on the booking it created with a SHA-256 fingerprint of the normalised request; a repeat with the same key and fingerprint returns that booking (same 201, `Location`, body, current status), a different fingerprint → 422 `IDEMPOTENCY_KEY_REUSED`. Not a separate table or a stored response: the key identifies exactly one booking and the replay is the live row (ADR 0007).
+- The key is looked up under the flight lock, after expired holds are released, so concurrent retries serialise on the lock and the second sees the first's committed booking; a partial unique index on the key (`uq_booking_idempotency_key`, V6) catches the same key sent at once for two different flights. Failed attempts store nothing.
 
 ## Cancellation
 - Soft release: the booking becomes CANCELLED and its seats RELEASED; history is kept and the seats are bookable again at once.

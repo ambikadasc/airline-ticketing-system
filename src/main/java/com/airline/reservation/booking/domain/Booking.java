@@ -45,6 +45,11 @@ public class Booking {
 	/** Set only for a booking created as HELD; kept afterwards as a record of the hold window. */
 	private Instant holdExpiresAt;
 
+	/** The client's Idempotency-Key that created this booking, and the fingerprint of that request; both null without the header. */
+	private String idempotencyKey;
+
+	private String requestHash;
+
 	@OneToMany(mappedBy = "booking", cascade = CascadeType.ALL)
 	@OrderBy("id")
 	private List<BookingSeat> seats = new ArrayList<>();
@@ -82,6 +87,23 @@ public class Booking {
 			booking.seats.add(new BookingSeat(booking, passenger, seatStatus, now));
 		}
 		return booking;
+	}
+
+	/**
+	 * Records the Idempotency-Key this booking was created under, once, so that a repeat of the
+	 * same request returns this booking. The key never changes afterwards.
+	 */
+	public void recordIdempotencyKey(String key, String requestHash) {
+		if (idempotencyKey != null) {
+			throw new IllegalStateException("Booking " + reference + " already has an idempotency key");
+		}
+		this.idempotencyKey = key;
+		this.requestHash = requestHash;
+	}
+
+	/** True when {@code requestHash} is the fingerprint of the request that created this booking. */
+	public boolean wasCreatedBy(String requestHash) {
+		return this.requestHash != null && this.requestHash.equals(requestHash);
 	}
 
 	/** Turns a live hold into a confirmed booking: the held seats become ACTIVE. */
@@ -153,6 +175,10 @@ public class Booking {
 
 	public Instant getCancelledAt() {
 		return cancelledAt;
+	}
+
+	public String getIdempotencyKey() {
+		return idempotencyKey;
 	}
 
 	public Long getId() {

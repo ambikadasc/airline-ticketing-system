@@ -190,6 +190,34 @@ class SeatHoldTest extends IntegrationTest {
 		}
 	}
 
+	@Test
+	void aRetryWithTheSameKeyReturnsTheSameHoldAndLaterTheConfirmedBooking() throws Exception {
+		String body = "{\"flightInstanceId\": %d, \"passengers\": [{\"name\": \"Passenger 12A\", \"seatNumber\": \"12A\"}]}"
+				.formatted(flightId);
+		String reference = JsonPath.read(mockMvc.perform(post("/api/v1/bookings").header("Idempotency-Key", "hold-key-1")
+						.contentType(MediaType.APPLICATION_JSON).content(body))
+				.andExpect(status().isCreated())
+				.andExpect(jsonPath("$.status").value("HELD"))
+				.andReturn().getResponse().getContentAsString(), "$.bookingReference");
+
+		mockMvc.perform(post("/api/v1/bookings").header("Idempotency-Key", "hold-key-1")
+						.contentType(MediaType.APPLICATION_JSON).content(body))
+				.andExpect(status().isCreated())
+				.andExpect(jsonPath("$.bookingReference").value(reference))
+				.andExpect(jsonPath("$.status").value("HELD"))
+				.andExpect(jsonPath("$.holdExpiresAt").value("2026-01-05T00:10:00Z"));
+		assertThat(searchAvailableSeats()).isEqualTo(179);
+
+		confirm(reference).andExpect(status().isOk());
+		mockMvc.perform(post("/api/v1/bookings").header("Idempotency-Key", "hold-key-1")
+						.contentType(MediaType.APPLICATION_JSON).content(body))
+				.andExpect(status().isCreated())
+				.andExpect(jsonPath("$.bookingReference").value(reference))
+				.andExpect(jsonPath("$.status").value("CONFIRMED"))
+				.andExpect(jsonPath("$.holdExpiresAt").doesNotExist());
+		concurrency.assertSeatInventoryConsistent(flightId);
+	}
+
 	// ---------------------------------------------------------------------------------------
 
 	private String bookAndExpect(String expectedStatus, String... seats) throws Exception {

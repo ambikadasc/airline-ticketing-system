@@ -33,7 +33,7 @@ com.airline.reservation
 └── booking/
     ├── api/          BookingController, CreateBookingRequest,
     │                 LookupMissLimiter, BookingLookupThrottle, BookingWebConfig
-    ├── service/      BookingService, BookingRequestValidator, PnrGenerator,
+    ├── service/      BookingService, BookingRequestValidator, PnrGenerator, RequestFingerprint,
     │                 CreateBookingCommand, BookingResult
     ├── service/policy/  BookingPolicy, ImmediateConfirmationPolicy, SeatHoldPolicy,
     │                    BookingPolicyConfig
@@ -111,7 +111,8 @@ shape are the same today. Request records stay in `api` and map to `*Command` re
 | `ImmediateConfirmationPolicy` | Returns `Booking.confirmed(...)` |
 | `SeatHoldPolicy` | Returns `Booking.held(..., now.plus(ttl))`, the expiry rounded down to whole seconds |
 | `BookingPolicyConfig` | `@Bean BookingPolicy` chosen by `airline.seat-hold.enabled`. The flag is read only from `AirlineProperties`: here, and where hold-specific queries would otherwise run (`BookingService.expireHolds`, `FlightSearchService.search`), which skip them when it is off |
-| `BookingRequestValidator` | One public `validate(command)`; one private method per rule (§5). Returns the normalised seat list |
+| `BookingRequestValidator` | One public `validate(command)`; one private method per rule (§5), including the optional `Idempotency-Key` (1–64 of `[A-Za-z0-9_-]`). Returns the normalised seat list |
+| `RequestFingerprint` | `of(flightInstanceId, passengers)`: hex SHA-256 of the normalised request, every field delimited. Stored on the booking next to its `Idempotency-Key`; a repeat with the same key but another fingerprint is refused |
 | `PnrGenerator` | 6 characters from `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` (no 0/O/1/I) via `SecureRandom`. A plain class, no interface: there is no second implementation |
 | `BookingService` | `createBooking`, `getBooking`, `confirmBooking`, `cancelBooking` (§7). `newReference()` draws up to 5 codes against `existsByReference`; if all are taken it throws `RETRY_LATER` (503) |
 | `BookingController` | `POST /api/v1/bookings`, `GET /api/v1/bookings/{reference}`, `POST .../{reference}/confirm`, `POST .../{reference}/cancel` |
@@ -236,6 +237,13 @@ POST /api/v1/bookings
   ]
 }
 ```
+Optional request header `Idempotency-Key: 6f1c2a9e-order-1001` (1–64 of letters, digits, `-`,
+`_`). A repeat with the same key and the same request returns the booking the first attempt
+created: the same `201`, `Location` and body, with the booking's current status (so a cancelled
+booking replays as `CANCELLED`). The same key with a different request (flight, seats, names or
+their order) → 422 `IDEMPOTENCY_KEY_REUSED`. The key is looked up under the flight lock (§7);
+the decision and its alternatives are in ADR 0007.
+
 `201 Created`, `Location: /api/v1/bookings/K7M2QX`. This body is also returned by GET, confirm
 and cancel:
 ```json
@@ -332,6 +340,7 @@ duplicate flight number) are `409`.
 | 409 | `BOOKING_NOT_CANCELLABLE` | Cancelling a booking on a flight that has departed |
 | 409 | `HOLD_EXPIRED` | Confirming a hold that has expired (status `EXPIRED`, or `HELD` past `hold_expires_at`) |
 | 409 | `BOOKING_NOT_CONFIRMABLE` | Confirming a `CANCELLED` booking |
+| 422 | `IDEMPOTENCY_KEY_REUSED` | The `Idempotency-Key` was already used for a booking request with a different fingerprint (also when the same key arrives at the same instant for two different flights: the loser's insert fails the partial unique index) |
 | 429 | `RATE_LIMITED` | More than `airline.lookup-throttle.max-misses` unsuccessful lookup/confirm/cancel attempts from one client within the window; `Retry-After` = seconds left in the window |
 | 503 | `LOCK_TIMEOUT` | Flight lock not acquired within 3 s; header `Retry-After` (`airline.retry-after`, default 1 s) |
 | 503 | `RETRY_LATER` | No pooled connection within `connection-timeout` (2 s), two bookings drew the same reference at the same instant (unique constraint), or no free reference in 5 draws; in every case nothing was changed; header `Retry-After` |
@@ -348,6 +357,7 @@ duplicate flight number) are `409`.
   `Retry-After` header when the exception carries one (`retryAfter()`, used by the lookup throttle).
 - `DataIntegrityViolationException` by constraint name: `uq_active_seat` → 409
   `SEAT_UNAVAILABLE`; `uq_schedule_flight_number` → 409 `DUPLICATE_FLIGHT_NUMBER`;
+  `uq_booking_idempotency_key` → 422 `IDEMPOTENCY_KEY_REUSED`;
   `uq_booking_reference` → 503 `RETRY_LATER` with `Retry-After`; anything else
   → 500.
 - `PessimisticLockingFailureException` (includes lock timeouts) → 503 `LOCK_TIMEOUT` with
@@ -373,7 +383,7 @@ COMMITTED. `spring.jpa.open-in-view=false`, so all loading happens inside the se
 | `ScheduleService.extendInstanceWindow` | read-write | For each schedule: generate `[today, lastBookableDate(today) + 1 day]`, bulk insert with `ON CONFLICT DO NOTHING`; return `(inserted, windowEnd)`. Triggered at startup, daily, and by `POST /admin/instance-window/extend`. Idempotent, safe on several nodes and overlapping triggers |
 | `FlightSearchService.search` | read-only | §4.2, §8 |
 | `SeatMapService.getSeatMap` | read-only | Load instance + aircraft → taken seats → walk the layout |
-| `BookingService.createBooking` | read-write | Validate request → **lock instance** → expire overdue holds → departed? → inside the booking window? → seats in layout? → taken seats (`SeatOccupancyQueries.takenSeats` ∩ requested)? → PNR → `policy.newBooking` → `saveAndFlush` → `instance.reserve(n)` |
+| `BookingService.createBooking` | read-write | Validate request → **lock instance** → expire overdue holds → `Idempotency-Key` sent? look it up: same fingerprint → return that booking, different → 422 → departed? → inside the booking window? → seats in layout? → taken seats (`SeatOccupancyQueries.takenSeats` ∩ requested)? → PNR → `policy.newBooking` (+ key and fingerprint) → `saveAndFlush` → `instance.reserve(n)` |
 | `BookingService.getBooking` | read-only | Load booking with seats by reference → load its instance → result with `effectiveStatus(now)` |
 | `BookingService.confirmBooking` | read-write | Instance id by reference → **lock instance** → expire overdue holds → load booking with seats → CONFIRMED: return; CANCELLED: 409 `BOOKING_NOT_CONFIRMABLE`; EXPIRED: 409 `HOLD_EXPIRED`; departed: 409 `FLIGHT_NOT_BOOKABLE`; else `booking.confirm(now)` |
 | `BookingService.cancelBooking` | read-write | Instance id by reference → **lock instance** → expire overdue holds → load booking with seats → CANCELLED/EXPIRED: return unchanged; flight departed? (409 `BOOKING_NOT_CANCELLABLE`); `n = booking.cancel(now)`, `instance.release(n)` |
@@ -381,6 +391,13 @@ COMMITTED. `spring.jpa.open-in-view=false`, so all loading happens inside the se
 **Lock order, the same on every write path:**
 `lock flight_instance → expire overdue holds → read/load booking rows → mutate → update counter`.
 One transaction locks exactly one instance, so lock waits cannot form a cycle.
+
+**Why the idempotency key is looked up after the lock.** Two retries of one request carry the
+same flight id, so they queue on the same lock; the second runs after the first has committed
+and finds its booking (READ COMMITTED sees committed rows). Looked up before the lock, both
+would miss and the second would book the seats again or hit the seat conflict, which is the
+failure the key exists to prevent. The lookup costs one indexed query, only when the header is
+present.
 
 **Why cancellation takes the flight lock even though seats are found by reference.** The
 seats themselves cannot be released twice: setting `RELEASED` twice changes nothing. The
@@ -451,16 +468,16 @@ Background job runs have no HTTP request, so `InstanceWindowJob` puts its own ru
 
 ## 10. Testing approach
 
-329 tests, all run by `./mvnw verify`. Integration tests extend one `IntegrationTest` base: one
+353 tests, all run by `./mvnw verify`. Integration tests extend one `IntegrationTest` base: one
 Spring context and one PostgreSQL 16 container (Testcontainers, real Flyway migrations), tables
 truncated before each test, a `MutableClock` reset to 2026-01-05T00:00Z, and no `@Transactional`
 on tests (they must see committed data).
 
 | Level | Classes | What |
 | --- | --- | --- |
-| Unit (test-first) | `SeatLayoutTest`, `FlightInstanceGeneratorTest`, `FlightScheduleTest`, `FlightInstanceTest`, `BookingTest`, `BookingHoldTest`, `BookingStatusTest`, `BookingRequestValidatorTest`, `PnrGeneratorTest`, `BookingPolicyTest`, `GlobalExceptionHandlerTest`, `InstanceWindowJobLogIdTest` | Pure logic without Spring: seat labels and validity; weekdays, inclusive window ends, leap day, overnight; the full status-transition table; hold expiry; validation rules; constraint-name mapping |
-| API (MockMvc) | `ScheduleApiTest`, `FlightSearchApiTest`, `SeatMapApiTest`, `BookingApiTest`, `BookingCancellationApiTest`, `InstanceWindowJobTest`, `InstanceWindowApiTest`, `ReferenceDataTest`, `EdgeCasesTest`, `BookingWindowConfigTest` (own context, 30-day window), `SchemaIntegrityTest` (V5 rules) | Every endpoint and response field; all-or-nothing booking; cancel then rebook; window job idempotent and gap-filling; window ends, overnight, late-day creation, last free seat |
-| Error contract | `ErrorContractTest`, `LockTimeoutTest`, `PoolExhaustionTest` (own context: a one-connection pool, held by the test), `BookingReferenceClashTest` (own context; fixed generator + missed check, as in the race), `LookupThrottleTest`, `LookupMissLimiterTest` (unit, test clock), `RequestIdFilterTest` | All 22 reachable error codes share one shape and leak nothing; lock timeout and pool exhaustion → 503 with `Retry-After`; reference clash → 503 `RETRY_LATER`, nothing stored; the 11th unsuccessful lookup → 429 with `Retry-After` = time left, other clients, search and booking unaffected, path variants counted; request ids |
+| Unit (test-first) | `SeatLayoutTest`, `FlightInstanceGeneratorTest`, `FlightScheduleTest`, `FlightInstanceTest`, `BookingTest`, `BookingHoldTest`, `BookingStatusTest`, `BookingRequestValidatorTest`, `RequestFingerprintTest`, `PnrGeneratorTest`, `BookingPolicyTest`, `GlobalExceptionHandlerTest`, `InstanceWindowJobLogIdTest` | Pure logic without Spring: seat labels and validity; weekdays, inclusive window ends, leap day, overnight; the full status-transition table; hold expiry; validation rules; constraint-name mapping |
+| API (MockMvc) | `ScheduleApiTest`, `FlightSearchApiTest`, `SeatMapApiTest`, `BookingApiTest`, `BookingCancellationApiTest`, `BookingIdempotencyTest`, `InstanceWindowJobTest`, `InstanceWindowApiTest`, `ReferenceDataTest`, `EdgeCasesTest`, `BookingWindowConfigTest` (own context, 30-day window), `SchemaIntegrityTest` (V5, V6 rules) | Every endpoint and response field; all-or-nothing booking; cancel then rebook; window job idempotent and gap-filling; window ends, overnight, late-day creation, last free seat; `Idempotency-Key`: same request replayed (same reference, `Location`, body; one booking), reused key → 422, no key unchanged, a replay after cancellation shows `CANCELLED`, 20 concurrent retries → one booking, the same key on two flights at once → one booking + one 422; held bookings replay as `HELD` then `CONFIRMED` (`SeatHoldTest`) |
+| Error contract | `ErrorContractTest`, `LockTimeoutTest`, `PoolExhaustionTest` (own context: a one-connection pool, held by the test), `BookingReferenceClashTest` (own context; fixed generator + missed check, as in the race), `LookupThrottleTest`, `LookupMissLimiterTest` (unit, test clock), `RequestIdFilterTest` | All 23 reachable error codes share one shape and leak nothing; lock timeout and pool exhaustion → 503 with `Retry-After`; reference clash → 503 `RETRY_LATER`, nothing stored; the 11th unsuccessful lookup → 429 with `Retry-After` = time left, other clients, search and booking unaffected, path variants counted; request ids |
 | Concurrency | `BookingConcurrencyTest`, `CancellationConcurrencyTest`, `DuplicateFlightNumberRaceTest` (helpers in `ConcurrencySupport`) | 50 threads on one seat → exactly 1 success; 50 seats; overlapping 1A+1B vs 1B+1C; 10 concurrent cancels; cancel vs book; duplicate flight number never 500. After each: counter invariant and no seat taken twice. Shown to fail with the lock and index removed (10 of 50 succeeded) |
 | Seat hold on | `SeatHoldTest` (own context, `airline.seat-hold.enabled=true`) | Hold → confirm; expiry frees seats for the next customer; confirm after expiry → 409; confirm-vs-expiry race decided by the clock |
 | Architecture | `ArchitectureTest` (ArchUnit) | Controllers do not access repositories; `..api..` not used by service/domain/persistence; no cycles between feature packages |

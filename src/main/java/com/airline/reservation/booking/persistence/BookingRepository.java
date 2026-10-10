@@ -34,4 +34,8 @@ public interface BookingRepository extends JpaRepository<Booking, Long> {
 	@Query("select b from Booking b join fetch b.seats where b.reference = :reference")
 	Optional<Booking> findWithSeatsByReference(@Param("reference") String reference);
 
+	/** The booking a client's Idempotency-Key created, if any. Served by uq_booking_idempotency_key. */
+	@Query("select b from Booking b join fetch b.seats where b.idempotencyKey = :key")
+	Optional<Booking> findWithSeatsByIdempotencyKey(@Param("key") String key);
+
 }

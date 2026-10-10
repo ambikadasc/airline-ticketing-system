@@ -35,11 +35,12 @@ public record CreateBookingRequest(
 			String seatNumber) {
 	}
 
-	public CreateBookingCommand toCommand() {
+	/** @param idempotencyKey the Idempotency-Key header, or null when the client did not send one */
+	public CreateBookingCommand toCommand(String idempotencyKey) {
 		List<PassengerSeat> seats = passengers.stream()
 				.map(passenger -> new PassengerSeat(passenger.name(), passenger.seatNumber()))
 				.toList();
-		return new CreateBookingCommand(flightInstanceId, seats);
+		return new CreateBookingCommand(flightInstanceId, seats, idempotencyKey);
 	}
 
 }

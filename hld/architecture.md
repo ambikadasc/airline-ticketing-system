@@ -107,6 +107,16 @@ Source: [`diagrams/booking-sequence.mmd`](diagrams/booking-sequence.mmd)
 The booking is all-or-nothing: if any requested seat is taken, nothing is booked and the
 response lists the taken seats.
 
+A client may send an `Idempotency-Key` header. The key is stored on the booking it creates
+with a fingerprint of the request, and it is looked up **under the flight lock**, after
+expired holds are released: a retry of a request that already succeeded returns that booking
+(same 201, `Location` and body, with the booking's current status) instead of a seat conflict,
+and concurrent retries queue on the same flight lock, so the second one sees the first's
+committed row. The same key with a different request is refused (422
+`IDEMPOTENCY_KEY_REUSED`); a partial unique index on the key is the database's own guard
+(ADR 0007). Without the header, nothing changes: a duplicate is still impossible, because the
+seats are the natural key, but the retrying client would only learn "seat taken".
+
 ### 4.5 Cancellation
 
 ![Cancellation sequence](diagrams/cancellation-sequence.png)
@@ -322,6 +332,7 @@ Source: [`diagrams/booking-state.mmd`](diagrams/booking-state.mmd)
 | Input-error status | `400` for all invalid input; `409` for conflicts with resource state | `422` for well-formed but rule-breaking input | Clients branch on `code`; one 4xx for "your input is wrong" keeps the contract simple |
 | Database | PostgreSQL 16, Flyway | MySQL, H2 | Partial indexes, `ON CONFLICT`, transactional DDL; tests run on the same engine via Testcontainers |
 | Authentication | None; admin under `/admin` | Spring Security | Out of scope by the brief; the path split is where role-based access would attach |
+| Safe retries | Optional `Idempotency-Key` stored on the booking it created, with a request fingerprint; looked up under the flight lock; 422 on reuse (ADR 0007) | A separate key table with stored responses; checking before the lock; a mandatory header | The key identifies exactly one booking, so the booking row is its home and the replay is the live row; after the lock, concurrent retries see the committed booking; optional keeps the brief's API unchanged |
 | Guessing protection | Per-client limit on unsuccessful lookups, as a Spring MVC interceptor on the reference endpoints | A servlet filter; a library rate limiter (Resilience4j, Bucket4j); nothing in-app | Counts only misses, so customers are never affected; the libraries count requests, not outcomes, so the same interceptor would still be needed around them; the interceptor matches exactly what Spring routes, so no path variant bypasses it; the body comes from the one error handler |
 | Time | UTC everywhere; injected `Clock` | System time | Deterministic tests; no dependence on host time zone |
 
@@ -380,7 +391,6 @@ Not built; each step is listed with the signal that would justify it.
 | Horizontal scaling of the service behind a load balancer | Already possible (stateless, DB-enforced correctness); do it when CPU or request latency on one node becomes the limit |
 | Serve search and seat map from a read replica or a short-TTL cache | Read traffic dominates and the primary's load grows; accept slightly stale availability, keep booking on the primary |
 | Partition `flight_instance` and `booking_seat` by flight date; archive departed flights | Tables reach tens of millions of rows or index maintenance slows writes |
-| Idempotency key on `POST /bookings` | Clients retry on timeouts and duplicate bookings appear |
 | Scheduled clean-up of expired holds | Seat hold is enabled and flights with stale holds see few writes, so lazy expiry lags in reports |
 | Finer-grained locking (per seat) | Measured lock waits on a single very popular flight become significant |
 | A `CancellationPolicy` Strategy (cut-off before departure, admin override, fees), like `BookingPolicy` | The business defines a second cancellation rule |
@@ -435,3 +445,4 @@ The brief is single-airline, but no part of the design depends on it.
 | 2026-10-09 | Phase 11: overload bounds made explicit (connection timeout 2 s, pool size 10; §6 "Overload"); pool exhaustion → 503 `RETRY_LATER`, a dropped connection stays 500; evolution rows for rate limiting, a read pool and a lookup throttle (§11) |
 | 2026-10-09 | Phase 12: unsuccessful booking lookups throttled per client (429 `RATE_LIMITED`, §4.6, §9); write-side backpressure recorded as a later step introduced as load requires (§6, §11) |
 | 2026-10-09 | Phase 13: load test on a throwaway stack (JMeter, SQL seed) and the measured figures (§6); query plans at 1M bookings (LLD §11); Swagger demo walkthrough (README) |
+| 2026-10-10 | Phase 14: optional `Idempotency-Key` on booking creation, stored on the booking and checked under the flight lock (§4.4, §9, ADR 0007); V6 adds the columns and the partial unique index |

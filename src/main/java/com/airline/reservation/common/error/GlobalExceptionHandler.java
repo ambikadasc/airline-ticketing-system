@@ -84,6 +84,12 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 			code = ErrorCode.DUPLICATE_FLIGHT_NUMBER;
 			detail = "A schedule with this flight number already exists";
 		}
+		else if ("uq_booking_idempotency_key".equals(constraint)) {
+			// The same key arrived at the same moment for two different flights (different locks, so the
+			// service's lookup could not see the other). The loser's transaction rolled back.
+			code = ErrorCode.IDEMPOTENCY_KEY_REUSED;
+			detail = "This Idempotency-Key was just used by another booking request";
+		}
 		else if ("uq_booking_reference".equals(constraint)) {
 			// Two bookings drew the same random reference at the same moment (no shared lock between
 			// different flights). The transaction rolled back, so nothing was booked: tell the client

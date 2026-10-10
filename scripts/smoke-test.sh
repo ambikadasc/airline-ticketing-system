@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end smoke test of the running system: create a schedule, search, view the seat map,
-# book, hit a seat conflict, cancel (twice) and rebook.
+# book, hit a seat conflict, cancel (twice), rebook, and retry safely with an Idempotency-Key.
 #
 # Needs only bash and curl. Run it against a fresh database:
 #   docker compose down -v && docker compose up --build -d
@@ -17,14 +17,13 @@ trap 'rm -f "$BODY_FILE"' EXIT
 # --- helpers -------------------------------------------------------------------------------
 
 # request METHOD PATH [JSON]: sets $CODE (HTTP status) and $BODY (response body).
+# Sends an Idempotency-Key header while $IDEMPOTENCY_KEY is set (step 10).
 request() {
   local method="$1" path="$2" data="${3:-}"
-  if [[ -n "$data" ]]; then
-    CODE=$(curl -s -o "$BODY_FILE" -w '%{http_code}' -X "$method" "$API$path" \
-      -H 'Content-Type: application/json' -d "$data")
-  else
-    CODE=$(curl -s -o "$BODY_FILE" -w '%{http_code}' -X "$method" "$API$path")
-  fi
+  local -a args=(-s -o "$BODY_FILE" -w '%{http_code}' -X "$method" "$API$path")
+  [[ -n "$data" ]] && args+=(-H 'Content-Type: application/json' -d "$data")
+  [[ -n "${IDEMPOTENCY_KEY:-}" ]] && args+=(-H "Idempotency-Key: $IDEMPOTENCY_KEY")
+  CODE=$(curl "${args[@]}")
   BODY="$(cat "$BODY_FILE")"
 }
 
@@ -118,5 +117,20 @@ check "8. book 12B+12C -> 201" test "$CODE" = 201
 # 9. Availability
 request GET "/flights?origin=DXB&destination=LHR&date=$DATE"
 check "9. search -> 178 available seats" test "$(field availableSeats)" = 178
+
+# 10. Safe retries: the same Idempotency-Key returns the same booking; reusing it for another request is refused
+IDEMPOTENCY_KEY="smoke-$DATE-$$"
+book 14A
+FIRST="$(field bookingReference)"
+check "10a. book 14A with an Idempotency-Key -> 201 ($FIRST)" test "$CODE" = 201
+book 14A
+check "10b. retry, same key and request -> 201 with the same reference" \
+  test "$CODE" = 201 -a "$(field bookingReference)" = "$FIRST"
+book 14B
+check "10c. same key, different request -> 422 IDEMPOTENCY_KEY_REUSED" \
+  test "$CODE" = 422 -a "$(field code)" = IDEMPOTENCY_KEY_REUSED
+IDEMPOTENCY_KEY=""
+request GET "/flights?origin=DXB&destination=LHR&date=$DATE"
+check "10d. search -> 177 available seats (14A booked once, 14B not at all)" test "$(field availableSeats)" = 177
 
 echo "All smoke checks passed."

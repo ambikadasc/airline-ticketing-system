@@ -30,6 +30,9 @@ public enum ErrorCode {
 	BOOKING_NOT_CONFIRMABLE(HttpStatus.CONFLICT),
 	HOLD_EXPIRED(HttpStatus.CONFLICT),
 
+	/** The Idempotency-Key was already used for a booking request with a different body. */
+	IDEMPOTENCY_KEY_REUSED(HttpStatus.UNPROCESSABLE_CONTENT),
+
 	/** Too many unsuccessful booking lookups from one client; the window end is in Retry-After. */
 	RATE_LIMITED(HttpStatus.TOO_MANY_REQUESTS),
 

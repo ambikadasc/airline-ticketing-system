@@ -31,6 +31,10 @@ KEEP="${KEEP:-0}"
 BASE_URL="http://localhost:8081"
 COMPOSE=(docker compose -p airline-load -f docker-compose.yml -f load/docker-compose.load.yml)
 RESULTS=load/results
+SEAT_HOLD="${AIRLINE_SEAT_HOLD_ENABLED:-false}"   # passed through to the app by docker-compose.yml
+if [[ "$SEAT_HOLD" == true ]]; then
+  RESULTS=load/results/seat-hold   # keeps the hold-on figures beside the default run's
+fi
 if [[ "$MODE" == throttle ]]; then
   # Only the guessers: a tiny seed, no steady traffic, and their own results folder, so the
   # load run's figures are never mixed with tens of thousands of refused requests.
@@ -77,17 +81,18 @@ step "3/5 JMeter for ${DURATION}s: threads search=$SEARCH lookup=$LOOKUP cancel=
   -Jsearch_threads="$SEARCH" -Jlookup_threads="$LOOKUP" -Jcancel_threads="$CANCEL" -Jbooking_threads="$BOOKING" -Jhot_threads="$HOT" \
   -Jinstances="$INSTANCES" -Jhot_flight="$HOT_FLIGHT" \
   -Jrace_threads="$RACE" -Jrace_flight="$RACE_FLIGHT" -Jrace_seat="$RACE_SEAT" -Jguess_threads="$GUESS" \
-  -Jsample_variables=code \
+  -Jsample_variables=code,bstatus \
   -l "/${RESULTS#load/}/run.jtl" -j "/${RESULTS#load/}/jmeter.log" -e -o "/${RESULTS#load/}/report" | grep -E "^summary =|Err:" | tail -3
 
 step "4/5 results (elapsed ms per request, from $RESULTS/run.jtl; saved to $RESULTS/summary.txt, pies in $RESULTS/outcomes.html)"
 exec > >(tee "$RESULTS/summary.txt") 2>&1
+echo "Mode: seat hold $([[ "$SEAT_HOLD" == true ]] && echo "ON (bookings are created HELD)" || echo "off (bookings are confirmed at once)")"
 echo "Data set: $DS_SCHEDULES schedules on $DS_ROUTES routes, one flight per schedule per day from $DS_DATES = $DS_INSTANCES flights;"
 echo "          $DS_SEATS seats per flight (A320), $DS_TAKEN already booked on each before the run ($DS_BOOKINGS bookings, $DS_CANCELLED of them cancelled, $DS_SEATROWS seat rows);"
 echo "          hot flight: $DS_HOT_NAME (id $HOT_FLIGHT) with $DS_HOT_FREE free seats at the start; race: seat $RACE_SEAT on flight $RACE_FLIGHT; $(grep -c . "$RESULTS/refs.csv") live references for lookup and cancel."
 echo
 # One pie per scenario, by outcome (status + error code): plain HTML and CSS conic-gradient, no libraries.
-colour() { case "$1" in 2*) echo "#2a9d8f";; *SEAT_UNAVAILABLE*) echo "#e9c46a";; 404*) echo "#8d99ae";; 429*) echo "#7b2cbf";; 5*) echo "#d62828";; *) echo "#f4a261";; esac; }
+colour() { case "$1" in *HELD*) echo "#4cc9f0";; *CANCELLED*) echo "#8ecae6";; 2*) echo "#2a9d8f";; *SEAT_UNAVAILABLE*) echo "#e9c46a";; 404*) echo "#8d99ae";; 429*) echo "#7b2cbf";; 5*) echo "#d62828";; *) echo "#f4a261";; esac; }
 PIES="$RESULTS/outcomes.html"
 cat > "$PIES" <<'HTML'
 <!doctype html><meta charset="utf-8"><title>Load test outcomes</title>
@@ -99,6 +104,7 @@ HTML
 cat >> "$PIES" <<HTML
 <h2 style="font-size:16px">Data set</h2>
 <table style="border-collapse:collapse;margin-bottom:20px">
+<tr><td style="padding:2px 12px 2px 0">Mode</td><td><b>seat hold $([[ "$SEAT_HOLD" == true ]] && echo "ON" || echo "off")</b>: bookings are $([[ "$SEAT_HOLD" == true ]] && echo "created HELD and confirmed later" || echo "confirmed at once")</td></tr>
 <tr><td style="padding:2px 12px 2px 0">Schedules</td><td><b>$DS_SCHEDULES</b> on <b>$DS_ROUTES</b> routes between the 10 seeded airports, one flight per schedule per day</td></tr>
 <tr><td style="padding:2px 12px 2px 0">Flights (instances)</td><td><b>$DS_INSTANCES</b>, dates $DS_DATES</td></tr>
 <tr><td style="padding:2px 12px 2px 0">Seats</td><td><b>$DS_SEATS</b> per flight (A320, 30 rows A–F); <b>$DS_TAKEN</b> already booked on each flight before the run</td></tr>
@@ -121,8 +127,14 @@ describe() {
     guess)        echo "Someone trying random references to find other people's bookings. Good: ten 404 BOOKING_NOT_FOUND, then only 429 RATE_LIMITED, refused without touching the database.";;
   esac
 }
-# .jtl columns: timeStamp,elapsed,label,responseCode,...,code (the first four never contain commas;
-# code, the application's error code or "none", is the last column via sample_variables)
+# .jtl columns: timeStamp,elapsed,label,responseCode,...,code,bstatus (the first four never contain
+# commas; the last two, via sample_variables, are the application's error code and the booking
+# status from a success body, "none" when absent). An outcome reads e.g. "201 HELD" or
+# "409 SEAT_UNAVAILABLE".
+outcome_counts() {  # label -> "outcome<TAB>count" lines
+  tail -n +2 "$RESULTS/run.jtl" | awk -F, -v l="$1" \
+    '$3 == l { c[$4 ($(NF-1) == "none" ? "" : " " $(NF-1)) ($NF ~ /^[A-Z]+$/ ? " " $NF : "")]++ } END { for (k in c) print k "\t" c[k] }'
+}
 SORTED="$(mktemp)"; trap 'rm -f "$SORTED"' EXIT
 printf '%-12s %8s %9s %6s %6s %6s %6s %6s   %s\n' scenario requests req/s p50 p90 p95 p99 max "responses by status and error code"
 for label in search lookup cancel booking booking-hot booking-race guess; do
@@ -130,7 +142,7 @@ for label in search lookup cancel booking booking-hot booking-race guess; do
   n="$(grep -c . "$SORTED" || true)"
   [[ "$n" -eq 0 ]] && continue
   pct() { sed -n "$(( (n * $1 + 99) / 100 ))p" "$SORTED"; }
-  codes="$(tail -n +2 "$RESULTS/run.jtl" | awk -F, -v l="$label" '$3 == l { n++; c[$4 ($NF == "none" ? "" : " " $NF)]++ } END { for (k in c) if (length(c) == 1) printf "%s x%d", k, c[k]; else printf "%s x%d (%.1f%%)  ", k, c[k], 100 * c[k] / n }')"
+  codes="$(outcome_counts "$label" | awk -F'\t' -v n="$n" '{ c[$1] = $2 } END { for (k in c) if (length(c) == 1) printf "%s x%d", k, c[k]; else printf "%s x%d (%.1f%%)  ", k, c[k], 100 * c[k] / n }')"
   seconds="$DURATION"; [[ "$label" == guess ]] && seconds=20   # the guessers always run for 20 s
   printf '%-12s %8d %9.1f %6s %6s %6s %6s %6s   %s\n' "$label" "$n" "$(awk -v n="$n" -v d="$seconds" 'BEGIN { printf "%.1f", n / d }')" \
     "$(pct 50)" "$(pct 90)" "$(pct 95)" "$(pct 99)" "$(tail -1 "$SORTED")" "$codes"
@@ -141,7 +153,7 @@ for label in search lookup cancel booking booking-hot booking-race guess; do
     stops+="${stops:+,}$(colour "$outcome") ${from}% ${to}%"
     legend+="<li><span style=\"background:$(colour "$outcome")\"></span>$outcome &mdash; $count ($(awk -v c="$count" -v n="$n" 'BEGIN { printf "%.1f", 100 * c / n }')%)</li>"
     from="$to"
-  done < <(tail -n +2 "$RESULTS/run.jtl" | awk -F, -v l="$label" '$3 == l { c[$4 ($NF == "none" ? "" : " " $NF)]++ } END { for (k in c) print k "\t" c[k] }' | sort -t "$(printf '\t')" -k2,2nr)
+  done < <(outcome_counts "$label" | sort -t "$(printf '\t')" -k2,2nr)
   printf '<div class="card"><h2>%s <small>%d requests</small></h2><p><small>%s</small></p><div class="pie" style="background:conic-gradient(%s)"></div><ul>%s</ul></div>\n' "$label" "$n" "$(describe "$label")" "$stops" "$legend" >> "$PIES"
 done
 echo '</div>' >> "$PIES"
@@ -152,7 +164,8 @@ if [[ "$HOT" -gt 0 ]]; then
   echo "hot flight $HOT_FLIGHT: $(sql "SELECT available_seats FROM flight_instance WHERE id = $HOT_FLIGHT") seats left"
 fi
 if [[ "$RACE" -gt 0 ]]; then
-  echo "race: $(sql "SELECT count(*) FROM booking_seat WHERE flight_instance_id = $RACE_FLIGHT AND seat_number = '$RACE_SEAT' AND status = 'ACTIVE'") active booking for seat $RACE_SEAT after $RACE simultaneous requests (expected exactly 1)"
+  # ACTIVE, or HELD when the stack runs with AIRLINE_SEAT_HOLD_ENABLED=true
+  echo "race: $(sql "SELECT count(*) FROM booking_seat WHERE flight_instance_id = $RACE_FLIGHT AND seat_number = '$RACE_SEAT' AND status IN ('ACTIVE', 'HELD')") live booking for seat $RACE_SEAT after $RACE simultaneous requests (expected exactly 1)"
 fi
 if [[ "$GUESS" -gt 0 ]]; then
   echo "guess: $(tail -n +2 "$RESULTS/run.jtl" | awk -F, '$3 == "guess" && $4 == 404' | wc -l | tr -d ' ') misses answered 404, then $(tail -n +2 "$RESULTS/run.jtl" | awk -F, '$3 == "guess" && $4 == 429' | wc -l | tr -d ' ') x 429 RATE_LIMITED (expected 10, then the rest)"

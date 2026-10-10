@@ -9,11 +9,13 @@
            -Jguess_threads=2
   Inputs written by the seed step: /results/routes.csv (origin,destination) and /results/refs.csv
   (one booking reference per line).
-  The machine-readable error code of every response ($.code, "none" for a success) is extracted
-  into the variable "code" and copied into the sample's response message. Any 2xx or 4xx is a
+  The machine-readable error code of every response ($.code, "none" for a success) and the
+  booking status in a success body ($.status: CONFIRMED, HELD, CANCELLED; "none" otherwise) are
+  extracted into the variables "code" and "bstatus"; the code is copied into the sample's
+  response message. Any 2xx or 4xx is a
   business answer (409 seat taken, 404 unknown reference, 429 throttled) and passes the
   assertion, so JMeter's pass/fail pie and Errors table show 5xx only, named by code
-  (e.g. 503/RETRY_LATER). With -Jsample_variables=code the code is also the last column of the
+  (e.g. 503/RETRY_LATER). With -Jsample_variables=code,bstatus both are the last columns of the
   .jtl; scripts/load-test.sh turns it into the per-scenario outcome summary and outcomes.html.
 -->
 <jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
@@ -51,11 +53,11 @@
       </HeaderManager>
       <hashTree/>
 
-      <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="error code">
-        <stringProp name="JSONPostProcessor.referenceNames">code</stringProp>
-        <stringProp name="JSONPostProcessor.jsonPathExprs">$.code</stringProp>
-        <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
-        <stringProp name="JSONPostProcessor.defaultValues">none</stringProp>
+      <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="error code and booking status">
+        <stringProp name="JSONPostProcessor.referenceNames">code;bstatus</stringProp>
+        <stringProp name="JSONPostProcessor.jsonPathExprs">$.code;$.status</stringProp>
+        <stringProp name="JSONPostProcessor.match_numbers">1;1</stringProp>
+        <stringProp name="JSONPostProcessor.defaultValues">none;none</stringProp>
       </JSONPostProcessor>
       <hashTree/>
 

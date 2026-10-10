@@ -27,7 +27,7 @@ Docker Compose
 
 ### Build
 ```bash
-./mvnw verify          # compiles and runs all 329 tests against a real PostgreSQL (needs Docker)
+./mvnw verify          # compiles and runs all 353 tests against a real PostgreSQL (needs Docker)
 ```
 
 ### Run
@@ -112,7 +112,8 @@ docker compose down -v && docker compose up --build -d
 bash scripts/smoke-test.sh
 ```
 The script needs only bash and curl. It runs the whole scenario and prints PASS or FAIL per
-step: create a schedule, search, seat map, book, a seat conflict, cancel twice, rebook.
+step: create a schedule, search, seat map, book, a seat conflict, cancel twice, rebook, and
+retry safely with an `Idempotency-Key` (same booking back; the key reused for another request → 422).
 
 ### Load test
 A JMeter run against a **separate, throwaway** stack, seeded by SQL to a chosen size. The
@@ -121,7 +122,12 @@ working stack and its database are never touched, and the throwaway stack is rem
 bash scripts/load-test.sh                 # 100 schedules, 36,500 flights, ~1M bookings, 60 s
 SCHEDULES=10 bash scripts/load-test.sh    # the ~100k-booking baseline
 bash scripts/load-test.sh throttle        # separate run: clients guessing references (see below)
+AIRLINE_SEAT_HOLD_ENABLED=true bash scripts/load-test.sh   # same scenarios with the seat hold on
 ```
+Each mode writes to its own folder (`load/results/`, `load/results/seat-hold/`,
+`load/results/throttle/`), and the summary and outcome page state the mode and the data set at
+the top, so hold-off and hold-on figures sit side by side; with the hold on, bookings show as
+`201 HELD` instead of `201 CONFIRMED`.
 Needs bash, curl and Docker only: JMeter runs from the `alpine/jmeter` image, nothing is
 installed. The script brings up Compose project `airline-load` (same image, app on
 `127.0.0.1:8081`, database not published), runs `load/seed.sql` (schedules on every route, a
@@ -199,7 +205,7 @@ Base path `/api/v1`, JSON, all times UTC. Full reference with examples:
 | GET | `/admin/schedules/{id}` | Fetch a schedule | 200 |
 | GET | `/flights?origin=&destination=&date=` | Search flights | 200 (`[]` if none) |
 | GET | `/flights/{flightInstanceId}/seats` | Seat map: every seat AVAILABLE or BOOKED | 200 |
-| POST | `/bookings` | Book one or more seats (all or nothing) | 201 + `Location` |
+| POST | `/bookings` | Book one or more seats (all or nothing); optional `Idempotency-Key` header makes a retry return the same booking | 201 + `Location` |
 | GET | `/bookings/{reference}` | Fetch a booking | 200 |
 | POST | `/bookings/{reference}/cancel` | Cancel; repeating it returns the same result | 200 |
 | POST | `/bookings/{reference}/confirm` | Confirm a held booking (seat hold only) | 200 |
@@ -221,8 +227,10 @@ curl -s 'localhost:8080/api/v1/flights?origin=DXB&destination=LHR&date=2026-11-0
 # 3. Seat map
 curl -s localhost:8080/api/v1/flights/42/seats
 
-# 4. Book two seats
-curl -s -X POST localhost:8080/api/v1/bookings -H 'Content-Type: application/json' -d '{
+# 4. Book two seats. The Idempotency-Key is optional: repeat the exact command after a timeout
+#    and you get the same 201 and reference back instead of a seat conflict.
+curl -s -X POST localhost:8080/api/v1/bookings -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: 6f1c2a9e-order-1001' -d '{
   "flightInstanceId": 42, "passengers": [
     {"name": "Ayesha Khan", "seatNumber": "12A"}, {"name": "Bilal Khan", "seatNumber": "12B"}]}'
 # -> 201 {"bookingReference":"K7M2QX",...,"status":"CONFIRMED"}
@@ -246,6 +254,7 @@ step names the design point it shows.
 | 3 | `GET /api/v1/flights/{flightInstanceId}/seats` | the id from step 2 | 180 seats, all `AVAILABLE` | Seat map = aircraft layout minus taken seats; two states only |
 | 4 | `POST /api/v1/bookings` | `{"flightInstanceId": <id>, "passengers": [{"name": "Ayesha Khan", "seatNumber": "12A"}, {"name": "Bilal Khan", "seatNumber": "12B"}]}` | 201, `bookingReference`, `status` `CONFIRMED` | Seats taken under the flight's row lock; a random 6-character reference |
 | 5 | step 4 again, same body | | 409 `SEAT_UNAVAILABLE`, `unavailableSeats` `["12A","12B"]` | All or nothing, and the error names the seats |
+| 5b | step 4 again with header `Idempotency-Key: demo-1` twice, then once more with seat `12C` | | 201 with a new reference, then 201 with the **same** reference, then 422 `IDEMPOTENCY_KEY_REUSED` | A retry is safe: the key returns the booking it created; the same key cannot be reused for a different request (ADR 0007) |
 | 6 | `GET /api/v1/bookings/{reference}` | the reference from step 4 | 200 with both passengers | Lookup by reference only (ADR 0005) |
 | 7 | `POST /api/v1/bookings/{reference}/cancel`, twice | | 200 `CANCELLED` both times; step 3 shows 12A/12B `AVAILABLE` again | Idempotent cancellation; seats released at once |
 | 8 | `GET /api/v1/bookings/ZZZZZZ`, eleven times | | ten 404 `BOOKING_NOT_FOUND`, then 429 `RATE_LIMITED` with `Retry-After` | Guessing references is throttled; successful lookups never count |
@@ -261,7 +270,8 @@ stack traces, SQL, or class or constraint names.
   "requestId": "3f9c1e0a-7b2d-4c55-9a51-0d6e2b8f4a17", "unavailableSeats": ["12B"] }
 ```
 Status policy: 400 for invalid input, 404 for unknown ids, 409 for conflicts with the current
-state, 503 with `Retry-After` for temporary conditions where nothing was changed: `LOCK_TIMEOUT`
+state, 422 for an `Idempotency-Key` reused with a different request, 503 with `Retry-After` for
+temporary conditions where nothing was changed: `LOCK_TIMEOUT`
 under extreme contention, `RETRY_LATER` when the connection pool is exhausted or two bookings
 happen to draw the same reference at the same instant. Clients retrying a 503 should add random
 jitter to `Retry-After` and cap the number of retries, so they don't all come back together.
@@ -290,6 +300,7 @@ The key choices; each has a decision record with the alternatives that were reje
 | Seat hold | Optional, behind a flag, as a Strategy; lazy expiry, no scheduler | [ADR 0003](docs/adr/0003-seat-hold-behind-a-flag.md) |
 | Code structure | Package by feature, layered inside; one-way feature dependencies enforced by ArchUnit | [ADR 0004](docs/adr/0004-package-by-feature.md) |
 | Authentication | None (out of scope); admin under `/admin`; bookings by unguessable reference | [ADR 0005](docs/adr/0005-no-authentication.md) |
+| Safe retries | Optional `Idempotency-Key` on booking creation, stored on the booking with a request fingerprint, looked up under the flight lock; same request → same booking, different request → 422 | [ADR 0007](docs/adr/0007-idempotency-key-on-booking-creation.md) |
 | Database | PostgreSQL 16 + Flyway; engine-specific features listed with MySQL equivalents | [ADR 0006](docs/adr/0006-postgresql-and-engine-specific-features.md) |
 | Errors | RFC 9457 ProblemDetail + `code` + `requestId` on every error | [LLD §6](lld/design.md#6-error-handling) |
 | Time | UTC everywhere; an injected `Clock`, so tests control time | [HLD §9](hld/architecture.md#9-major-design-decisions) |
@@ -498,7 +509,7 @@ immediately, and the history stays. The seats go back to the flight's counter.
 | Filter chain | `RequestIdFilter` puts a request id on every request, response and log line | No tracing framework for a single service |
 | Repository | Spring Data interfaces per aggregate; one native query class (`SeatOccupancyQueries`) where SQL is clearer than JPQL | No generic DAO layer, no query objects |
 | Dependency injection | Constructor injection, `final` fields, no field injection; `Clock` and policies are beans | No service locator, no static access |
-| Idempotent operations | Cancel returns the same result when repeated; instance-window top-up inserts only what is missing (`ON CONFLICT DO NOTHING`) | No idempotency key on `POST /bookings` (listed under scaling) |
+| Idempotent operations | Cancel returns the same result when repeated; instance-window top-up inserts only what is missing (`ON CONFLICT DO NOTHING`); `POST /bookings` with an `Idempotency-Key` returns the booking it created on a retry (ADR 0007) | No stored-response cache: the replay is built from the live booking row |
 | Soft release | A cancelled seat row becomes `RELEASED`, never deleted; the partial index ignores it | No hard deletes, so history and audit stay intact |
 
 Patterns the planned extensions would bring, each at a seam that already exists; none is in the
@@ -526,7 +537,6 @@ None of this is built. Each step is paired with the signal that would justify it
 | Run several application instances behind a load balancer | Already possible: the service is stateless and correctness lives in the database. Do it when one node's CPU or latency is the limit |
 | Serve search and seat map from a read replica or a short-TTL cache | Read traffic dominates; accept slightly stale availability and keep booking on the primary |
 | Partition `flight_instance` and `booking_seat` by date; archive departed flights | Tables reach tens of millions of rows or index upkeep slows writes |
-| Idempotency key on `POST /bookings` | Clients retry on timeouts and duplicate bookings appear |
 | Scheduled sweep of expired holds | The seat hold is on and flights with stale holds see few writes (reporting lags) |
 | Finer-grained locking (per seat) | Measured lock waits on a single very popular flight |
 | A `CancellationPolicy` Strategy (cut-off window, admin override, fees), like `BookingPolicy` | The business defines a second cancellation rule; today the one rule is a single check in `BookingService` |
@@ -619,6 +629,11 @@ before any database work, and the error says why (`RATE_LIMITED`, `Retry-After`)
 exact per client up to the number of requests in flight: the check runs before the request and
 the miss is recorded after it, so two parallel guessers can both pass at nine (11 misses in two
 of four runs). Per client means per address, which is why this is a separate run (ADR 0005).
+- With the seat hold on (`AIRLINE_SEAT_HOLD_ENABLED=true`, 100k run), every booking is created
+  `HELD` and the same guarantees hold: one live claim per seat, one winner in the race, the
+  invariant intact. Throughput is about 15 % lower (search 603 vs 719 req/s, hot flight 479 vs
+  611) because every write also runs the overdue-hold query under the lock, which the default
+  path skips entirely.
 - These are relative numbers: client, application and database shared one machine, so they
   show the shape (flat with data, bounded under contention), not the capacity of a deployment.
 
@@ -677,15 +692,15 @@ coordination outside this system), and aircraft-rotation clashes (see the table 
 
 ## Testing approach
 
-329 tests, all run by `./mvnw verify`. Integration tests use PostgreSQL 16 in Testcontainers with
+353 tests, all run by `./mvnw verify`. Integration tests use PostgreSQL 16 in Testcontainers with
 the real Flyway migrations. No H2, and no test runs inside a test transaction.
 
 | Kind | What it proves | Classes |
 | --- | --- | --- |
 | Unit, test-first | Seat layout (labels, order, validity); instance generation (operating days only, both window ends, leap day, overnight); booking status transitions (full table); booking and hold behaviour; validators; reference format | `SeatLayoutTest`, `FlightInstanceGeneratorTest`, `FlightScheduleTest`, `BookingStatusTest`, `BookingTest`, `BookingHoldTest`, `FlightInstanceTest`, `BookingRequestValidatorTest`, `PnrGeneratorTest`, policy tests |
-| API (MockMvc + real DB) | Every endpoint's happy path; every response field; booking is all or nothing; cancel then rebook; idempotent cancel; window top-up idempotent and gap-filling (job and endpoint) | `ScheduleApiTest`, `FlightSearchApiTest`, `SeatMapApiTest`, `BookingApiTest`, `BookingCancellationApiTest`, `InstanceWindowJobTest`, `InstanceWindowApiTest` |
+| API (MockMvc + real DB) | Every endpoint's happy path; every response field; booking is all or nothing; cancel then rebook; idempotent cancel; window top-up idempotent and gap-filling (job and endpoint); a retry with the same `Idempotency-Key` returns the same booking (also 20 concurrent retries → one booking), the key reused for another request → 422, no key → unchanged behaviour | `ScheduleApiTest`, `FlightSearchApiTest`, `SeatMapApiTest`, `BookingApiTest`, `BookingCancellationApiTest`, `BookingIdempotencyTest`, `InstanceWindowJobTest`, `InstanceWindowApiTest` |
 | Concurrency | Exactly one winner for one seat (50 threads); no partial overlap; concurrent cancels release once; cancel-vs-book stays consistent; inventory invariant after every scenario; duplicate-number race gives no 500 | `BookingConcurrencyTest`, `CancellationConcurrencyTest`, `DuplicateFlightNumberRaceTest` |
-| Error contract | All 22 reachable error codes have the same shape and leak nothing; lock timeout → 503; pool exhaustion → 503 within the connection timeout; a booking-reference clash → 503 `RETRY_LATER`, nothing stored; the 11th unsuccessful lookup in a minute → 429, other clients and other endpoints unaffected; request ids; job-run ids | `ErrorContractTest`, `LockTimeoutTest`, `PoolExhaustionTest`, `BookingReferenceClashTest`, `LookupThrottleTest`, `LookupMissLimiterTest`, `RequestIdFilterTest`, `GlobalExceptionHandlerTest`, `InstanceWindowJobLogIdTest` |
+| Error contract | All 23 reachable error codes have the same shape and leak nothing; lock timeout → 503; pool exhaustion → 503 within the connection timeout; a booking-reference clash → 503 `RETRY_LATER`, nothing stored; the 11th unsuccessful lookup in a minute → 429, other clients and other endpoints unaffected; request ids; job-run ids | `ErrorContractTest`, `LockTimeoutTest`, `PoolExhaustionTest`, `BookingReferenceClashTest`, `LookupThrottleTest`, `LookupMissLimiterTest`, `RequestIdFilterTest`, `GlobalExceptionHandlerTest`, `InstanceWindowJobLogIdTest` |
 | Seat hold on | Hold → confirm; expiry frees seats; confirm-vs-expiry race (the clock decides the single winner) | `SeatHoldTest` |
 | Edge cases, configuration, schema | Last day of the window, overnight, created late in the day, last free seat, more seats than remain; a 30-day window applied by configuration to generation, search and booking; database-carried rules (seat row must match its booking's flight, seat and flight-number formats) | `EdgeCasesTest`, `BookingWindowConfigTest`, `SchemaIntegrityTest` |
 | Architecture | Controllers never reach repositories; nothing depends on the API layer; no package cycles | `ArchitectureTest` |
@@ -705,10 +720,10 @@ Load and data-growth behaviour is measured rather than unit-tested: [Load test](
 ├── README.md                 this file
 ├── hld/                      architecture.md, architecture.pdf, diagrams/ (.mmd sources + .png)
 ├── lld/                      design.md
-├── docs/adr/                 decision records 0001–0006
+├── docs/adr/                 decision records 0001–0007
 ├── src/main/java/…           the application (packaged by feature)
 ├── src/main/resources/       application.yml
-├── db/                       schema.sql (commented snapshot), migrations/ (Flyway V1–V4)
+├── db/                       schema.sql (commented snapshot), migrations/ (Flyway V1–V6)
 ├── tests/                    java/ (all tests)
 ├── load/                     load test: seed.sql, airline-load.jmx (JMeter), Compose override for the throwaway stack
 ├── scripts/smoke-test.sh     end-to-end check against a running stack

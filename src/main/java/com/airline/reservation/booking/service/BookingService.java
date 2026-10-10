@@ -75,6 +75,23 @@ public class BookingService {
 		Instant now = clock.instant();
 		expireHolds(flight, now);
 
+		// A retry of a request that already succeeded returns that booking. Looked up only now, under
+		// the flight lock: a concurrent retry carries the same flight id, so it waits here and then
+		// sees the first attempt's committed row instead of booking the seats a second time.
+		String requestHash = command.idempotencyKey() == null ? null
+				: RequestFingerprint.of(command.flightInstanceId(), passengers);
+		if (requestHash != null) {
+			Booking earlier = bookingRepository.findWithSeatsByIdempotencyKey(command.idempotencyKey()).orElse(null);
+			if (earlier != null) {
+				if (!earlier.wasCreatedBy(requestHash)) {
+					throw new ApiException(ErrorCode.IDEMPOTENCY_KEY_REUSED,
+							"This Idempotency-Key was already used for a different booking request");
+				}
+				log.info("Booking replayed: reference={} flightInstanceId={}", earlier.getReference(), flight.getId());
+				return BookingResult.from(earlier, flight, now);
+			}
+		}
+
 		if (flight.isDepartedAt(now)) {
 			throw new ApiException(ErrorCode.FLIGHT_NOT_BOOKABLE, "Flight has already departed: " + flight.getId());
 		}
@@ -99,6 +116,9 @@ public class BookingService {
 		}
 
 		Booking booking = bookingPolicy.newBooking(newReference(), flight.getId(), passengers, now);
+		if (requestHash != null) {
+			booking.recordIdempotencyKey(command.idempotencyKey(), requestHash);
+		}
 		bookingRepository.saveAndFlush(booking);
 		flight.reserve(passengers.size());
 

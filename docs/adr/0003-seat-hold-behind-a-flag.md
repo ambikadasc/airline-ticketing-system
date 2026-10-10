@@ -47,3 +47,8 @@ changing the behaviour the brief asks for.
   rarely outlives the hold; when it does, the re-check under the flight lock on confirmation is
   the backstop (409 `HOLD_EXPIRED`, nothing stored, the payment to be refunded by the caller),
   so a seat that expired and was resold during a slow payment can never be confirmed twice.
+- Several application instances: expiry compares each instance's clock with the stored
+  `hold_expires_at`, so clock skew between nodes shifts an expiry by at most that skew, which is
+  milliseconds against a ten-minute hold; and expiry is decided under the flight lock, so two
+  nodes can never both act on the same hold. If the TTL were ever reduced to seconds, use the
+  database clock (`now()` in the expiry query) instead of the application clock.

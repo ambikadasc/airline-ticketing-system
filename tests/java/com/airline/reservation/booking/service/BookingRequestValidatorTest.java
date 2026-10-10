@@ -63,6 +63,25 @@ class BookingRequestValidatorTest {
 		assertInvalid(command(seat("12A"), seat("12a")));
 	}
 
+	@Test
+	void acceptsAnAbsentOrWellFormedIdempotencyKey() {
+		assertThat(validator.validate(new CreateBookingCommand(1L, List.of(seat("12A")), null))).hasSize(1);
+		assertThat(validator.validate(new CreateBookingCommand(1L, List.of(seat("12A")), "order-2026_000123")))
+				.hasSize(1);
+		assertThat(validator.validate(new CreateBookingCommand(1L, List.of(seat("12A")), "a".repeat(64)))).hasSize(1);
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"", " ", "has space", "semi;colon", "ünïcödé", "slash/x"})
+	void rejectsAMalformedIdempotencyKey(String key) {
+		assertInvalid(new CreateBookingCommand(1L, List.of(seat("12A")), key));
+	}
+
+	@Test
+	void rejectsAnIdempotencyKeyLongerThan64Characters() {
+		assertInvalid(new CreateBookingCommand(1L, List.of(seat("12A")), "a".repeat(65)));
+	}
+
 	private void assertInvalid(CreateBookingCommand command) {
 		assertThatThrownBy(() -> validator.validate(command))
 				.isInstanceOf(ApiException.class)

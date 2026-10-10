@@ -125,6 +125,17 @@ class ErrorContractTest extends IntegrationTest {
 	}
 
 	@TestFactory
+	Stream<DynamicTest> aReusedIdempotencyKeyIsRefused() {
+		return Stream.of(DynamicTest.dynamicTest("Idempotency-Key reused for another request -> 422 IDEMPOTENCY_KEY_REUSED",
+				() -> {
+					mockMvc.perform(((MockHttpServletRequestBuilder) bookingRequest(flightId, "12C"))
+							.header("Idempotency-Key", "contract-key"));
+					assertContract(((MockHttpServletRequestBuilder) bookingRequest(flightId, "12D"))
+							.header("Idempotency-Key", "contract-key"), 422, "IDEMPOTENCY_KEY_REUSED", response -> { });
+				}));
+	}
+
+	@TestFactory
 	Stream<DynamicTest> notAcceptableIsReportedToo() {
 		return Stream.of(error("only JSON can be produced", 406, "NOT_ACCEPTABLE",
 				get("/api/v1/admin/schedules/1").accept(MediaType.TEXT_PLAIN)));

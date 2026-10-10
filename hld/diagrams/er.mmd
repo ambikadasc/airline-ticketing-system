@@ -59,6 +59,8 @@ erDiagram
         timestamptz created_at
         timestamptz hold_expires_at "set for holds, kept after"
         timestamptz cancelled_at
+        varchar(64) idempotency_key "partial UK; client's Idempotency-Key"
+        varchar(64) request_hash "SHA-256 of the request; null iff key is null"
     }
     BOOKING_SEAT {
         bigint id PK
