@@ -136,7 +136,7 @@ outcome_counts() {  # label -> "outcome<TAB>count" lines
     '$3 == l { c[$4 ($(NF-1) == "none" ? "" : " " $(NF-1)) ($NF ~ /^[A-Z]+$/ ? " " $NF : "")]++ } END { for (k in c) print k "\t" c[k] }'
 }
 SORTED="$(mktemp)"; trap 'rm -f "$SORTED"' EXIT
-printf '%-12s %8s %9s %6s %6s %6s %6s %6s   %s\n' scenario requests req/s p50 p90 p95 p99 max "responses by status and error code"
+printf '%-12s %8s %9s %6s %6s %6s %6s %6s   %s\n' scenario requests req/s p50ms p90ms p95ms p99ms maxms "responses by status and error code"
 for label in search lookup cancel booking booking-hot booking-race guess; do
   tail -n +2 "$RESULTS/run.jtl" | awk -F, -v l="$label" '$3 == l { print $2 }' | sort -n > "$SORTED"
   n="$(grep -c . "$SORTED" || true)"
